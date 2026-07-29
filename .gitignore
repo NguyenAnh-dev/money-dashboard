@@ -1,0 +1,46 @@
+# ---- Virtual environments ----
+# Never commit these. Thousands of machine-specific files with absolute
+# paths baked in. Others recreate the env from requirements.txt instead.
+venv/
+.venv/
+env/
+ENV/
+
+# ---- Python caches ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ---- Secrets ----
+# CRITICAL for this project: your Plaid API keys go in .env (Step 4).
+# Committing API keys to a public repo is the single most common way
+# students leak credentials. Bots scan GitHub for this within minutes.
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
+
+# ---- Local data ----
+# Your SQLite database (Step 5) holds financial data. Keep it local.
+*.db
+*.sqlite
+*.sqlite3
+
+# ---- Editor / OS junk ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Build artifacts ----
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
