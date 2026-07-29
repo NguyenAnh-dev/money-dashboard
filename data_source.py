@@ -75,7 +75,7 @@ def get_accounts() -> list[Account]:
 def get_transactions() -> list[Transaction]:
     """Fake transactions spanning May-July 2026, shaped like a real statement.
 
-    WHAT YOUR STEP-2 DETECTOR SHOULD FIND (true recurring):
+    WHAT MY STEP-2 DETECTOR SHOULD DO (true recurring):
       - Spotify         $10.99  anchored to the 4th   (posts late in July)
       - Netflix         $15.49  anchored to the 12th  (PRICE RISES to $17.99)
       - Planet Fitness  $24.99  anchored to the 20th  (posts late in June)
