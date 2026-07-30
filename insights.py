@@ -16,6 +16,23 @@ class RecurringCharge:
     last_date: date
     occurrences: int
 
+    # Derived, so the CLI and (later) the API report a price change the same
+    # way instead of each recomputing it in its own display loop.
+    @property
+    def delta_cents(self) -> int | None:
+        """Signed price move, or None if the price has never changed."""
+        if self.previous_cents is None:
+            return None
+        return self.latest_cents - self.previous_cents
+
+    @property
+    def direction(self) -> str | None:
+        """'up', 'down', or None if the price has never changed."""
+        delta = self.delta_cents
+        if not delta:
+            return None
+        return "up" if delta > 0 else "down"
+
 def total_balance(accounts):
     total = 0
     for account in accounts:
@@ -78,21 +95,3 @@ def find_recurring(transactions):
         ))
 
     return sorted(found, key=lambda c: c.latest_cents, reverse=True)
-
-if __name__ == "__main__":
-    from data_source import get_accounts, get_transactions, dollars
-    transactions = get_transactions()
-
-    print(dollars(total_balance(get_accounts())))
-    for category, cents in spending_by_category(transactions):
-        print(f"{category:18} {dollars(cents)}")
-
-    print()
-    for charge in find_recurring(transactions):
-        alert = ""
-        if charge.previous_cents is not None:
-            diff = charge.latest_cents - charge.previous_cents
-            direction = "up" if diff > 0 else "down"
-            alert = f"  <- {direction} {dollars(abs(diff))}"
-        print(f"{charge.merchant:15} {dollars(charge.latest_cents):>8}"
-              f"  ~day {charge.day:<3} last {charge.last_date}{alert}")

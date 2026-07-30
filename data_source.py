@@ -80,9 +80,14 @@ def get_transactions() -> list[Transaction]:
       - Netflix         $15.49  anchored to the 12th  (PRICE RISES to $17.99)
       - Planet Fitness  $24.99  anchored to the 20th  (posts late in June)
       - T-Mobile        ~$84    anchored to the 16th  (AMOUNT VARIES - hard case)
-      - Payroll Deposit incoming, monthly on the 1st
 
     WHAT IT SHOULD NOT FLAG (real-life noise):
+      - Payroll Deposit. It IS perfectly monthly (the 1st, gaps of 31 and 30
+        days), but the detector is charges-only BY DESIGN: it skips
+        `amount_cents < 0` before grouping. "Recurring" here means
+        subscriptions -- a paycheck sorted by `latest_cents` lands below
+        Spotify, and a price-change delta is meaningless against a raise.
+        Recurring income is a separate feature (cash-flow), not this one.
       - Starbucks, Chipotle, Whole Foods, Trader Joes, Uber, Amazon, CVS.
         These repeat, but irregularly: the count per month varies, the
         amounts vary, the days do not line up, and some merchants skip a
@@ -125,7 +130,7 @@ def get_transactions() -> list[Transaction]:
         add(_posts_on(2026, month, 16), "T-MOBILE PCS SVC 800-937-8997",
             "T-Mobile", tmobile_cents[month], "Bills & Utilities", "acc_1")
 
-        # --- income ---
+        # --- income: monthly, but NOT a target of find_recurring (see docstring) ---
         add(date(2026, month, 1), "ACME CORP DIR DEP PPD ID:1234567890",
             "Payroll Deposit", -230000, "Income", "acc_1")
 

@@ -3,6 +3,7 @@ from rich.table import Table
 from rich.panel import Panel
 
 from data_source import get_accounts, get_transactions, dollars
+from insights import total_balance, spending_by_category, find_recurring
 
 console = Console()
 
@@ -45,6 +46,42 @@ def show_recent_transactions(transactions, limit=10):
     console.print(table)
 
 
+def show_spending(transactions):
+    table = Table(title="Spending by Category", title_style="bold",
+                  header_style="bold cyan")
+    table.add_column("Category")
+    table.add_column("Amount", justify="right")
+
+    for category, cents in spending_by_category(transactions):
+        table.add_row(category, dollars(cents))
+
+    console.print(table)
+
+
+def show_subscriptions(transactions):
+    table = Table(title="Recurring Charges", title_style="bold",
+                  header_style="bold cyan")
+    table.add_column("Merchant")
+    table.add_column("Amount", justify="right")
+    table.add_column("Billing day", justify="right")
+    table.add_column("Last charged")
+    table.add_column("Change", justify="right")
+
+    for c in find_recurring(transactions):
+        # direction is None when the price has never moved.
+        if c.direction == "up":
+            change = f"[red]+{dollars(c.delta_cents)}[/red]"
+        elif c.direction == "down":
+            change = f"[green]{dollars(c.delta_cents)}[/green]"
+        else:
+            change = ""
+
+        table.add_row(c.merchant, dollars(c.latest_cents), str(c.day),
+                      str(c.last_date), change)
+
+    console.print(table)
+
+
 def main():
     accounts = get_accounts()
     transactions = get_transactions()
@@ -54,6 +91,10 @@ def main():
     console.print()
 
     show_accounts(accounts)
+    console.print()
+    show_subscriptions(transactions)
+    console.print()
+    show_spending(transactions)
     console.print()
     show_recent_transactions(transactions)
     console.print()
