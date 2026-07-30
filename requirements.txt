@@ -1,1 +1,3 @@
+# Requires Python 3.10+ -- the codebase uses `X | None` unions.
+# Developed and tested against 3.13.
 rich==15.0.0

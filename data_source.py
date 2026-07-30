@@ -17,7 +17,12 @@ how you silently lose money. Say this in an interview and people notice.
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-#MY FORMAT, NOT PLAID'S ONE
+from core.money import format_money
+
+# MY FORMAT, NOT PLAID'S ONE.
+# The real one now lives in core/models.py. These two dataclasses stay here
+# until 4.2 turns this module into adapters/fake.py; keeping them means this
+# step adds the canonical model without touching what the dashboard runs on.
 
 @dataclass
 class Account:
@@ -44,10 +49,13 @@ class Transaction:
 # ---------------------------------------------------------------------------
 
 def dollars(cents: int) -> str:
-    """Turn integer cents into a display string. 1234 -> '$12.34'"""
-    sign = "-" if cents < 0 else ""
-    cents = abs(cents)
-    return f"{sign}${cents // 100}.{cents % 100:02d}"
+    """Turn integer cents into a display string. 1234 -> '$12.34'
+
+    Kept as a thin alias so main.py does not have to change in the same step
+    the formatter moves. Callers migrate to core.money.format_money in 4.2,
+    which is also where the currency argument starts mattering.
+    """
+    return format_money(cents)
 
 
 def _posts_on(year: int, month: int, anchor_day: int) -> date:

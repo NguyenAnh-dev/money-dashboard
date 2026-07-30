@@ -5,10 +5,15 @@ from rich.panel import Panel
 from data_source import get_accounts, get_transactions, dollars
 from insights import total_balance, spending_by_category, find_recurring
 
-console = Console()
+# NOTE: there is deliberately no module-level `console`. The rendering target is
+# threaded through as an argument so tests/check_baseline.py can pin width,
+# encoding, and colour by PASSING a console rather than reassigning a global.
+# Monkeypatching a module attribute did work -- globals are resolved at call
+# time -- but it couples the gate to this file's internals: any show_* that
+# later built its own Console would escape all three pins.
 
 
-def show_accounts(accounts):
+def show_accounts(accounts, console):
     table = Table(title="Accounts", title_style="bold", header_style="bold cyan")
     table.add_column("Institution")
     table.add_column("Account")
@@ -27,7 +32,7 @@ def show_accounts(accounts):
                         title="Net Worth (across all banks)", expand=False))
 
 
-def show_recent_transactions(transactions, limit=10):
+def show_recent_transactions(transactions, console, limit=10):
     table = Table(title=f"Recent Transactions (latest {limit})",
                   title_style="bold", header_style="bold cyan")
     table.add_column("Date")
@@ -46,7 +51,7 @@ def show_recent_transactions(transactions, limit=10):
     console.print(table)
 
 
-def show_spending(transactions):
+def show_spending(transactions, console):
     table = Table(title="Spending by Category", title_style="bold",
                   header_style="bold cyan")
     table.add_column("Category")
@@ -58,7 +63,7 @@ def show_spending(transactions):
     console.print(table)
 
 
-def show_subscriptions(transactions):
+def show_subscriptions(transactions, console):
     table = Table(title="Recurring Charges", title_style="bold",
                   header_style="bold cyan")
     table.add_column("Merchant")
@@ -82,21 +87,31 @@ def show_subscriptions(transactions):
     console.print(table)
 
 
-def main():
+def main(console=None):
+    """Render the dashboard.
+
+    `console` is injected by the baseline gate. Left as None it builds one that
+    adapts to the real terminal, which is what a human wants.
+    """
+    console = console or Console()
+
     accounts = get_accounts()
     transactions = get_transactions()
 
     console.print()
+    # NOTE: "v0.1 - fake data" is hardcoded on purpose until 4.6. Making it
+    # reflect the active source is a one-line cosmetic change that WOULD move
+    # the baseline, and steps 4.1-4.5 are supposed to be diff-free.
     console.print("[bold]  MONEY DASHBOARD[/bold]  [dim]v0.1 - fake data[/dim]")
     console.print()
 
-    show_accounts(accounts)
+    show_accounts(accounts, console)
     console.print()
-    show_subscriptions(transactions)
+    show_subscriptions(transactions, console)
     console.print()
-    show_spending(transactions)
+    show_spending(transactions, console)
     console.print()
-    show_recent_transactions(transactions)
+    show_recent_transactions(transactions, console)
     console.print()
     console.print(f"[dim]{len(transactions)} transactions across "
                   f"{len(accounts)} accounts at "

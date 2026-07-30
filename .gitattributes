@@ -1,0 +1,19 @@
+# This repo is checked out with core.autocrlf=true, which rewrites LF to CRLF on
+# checkout. That is harmless for source files but fatal for the baseline, which
+# tests/check_baseline.py compares as an exact string: a CRLF-translated file can
+# never match rich's LF output, and the gate would fail forever with an
+# invisible cause.
+#
+# -text disables all end-of-line conversion for the file, in both directions.
+tests/baseline/dashboard.txt -text
+
+# The baseline also carries SIGNIFICANT TRAILING WHITESPACE (rich centres table
+# titles by padding them). Editors set to strip trailing whitespace on save, or
+# a pre-commit hook that does, will silently rewrite it and break the gate.
+# Nothing in git can prevent that -- it is an editor setting -- so it is called
+# out in tests/baseline/README.md too. If the gate starts failing on lines that
+# look identical, diff the trailing spaces first.
+
+# Keep normal sources LF in the repo, however they sit in the working tree.
+*.py text eol=lf
+*.md text eol=lf
