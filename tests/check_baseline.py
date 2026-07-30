@@ -116,6 +116,7 @@ def _txn_key(txn) -> str:
 
 def check_structure() -> list[str]:
     """Assertions the rendered text is blind to. Returns a list of failures."""
+    from core.models import DEBT_TYPES
     from data_source import get_accounts, get_transactions
 
     accounts = get_accounts()
@@ -154,6 +155,19 @@ def check_structure() -> list[str]:
             failures.append(f"{_txn_key(t)}: merchant is empty -- grouping "
                             f"happens on it")
             break
+
+    # Debt is stored negative. Same getattr fallback as _account_key: accounts
+    # have no `type` until 4.2, so this finds nothing until then, and arms
+    # itself the moment Amex becomes CREDIT. `> 0`, not `>= 0` -- a paid-off
+    # card sits at exactly zero and that is fine.
+    for a in accounts:
+        if getattr(a, "type", None) in DEBT_TYPES and a.balance_cents > 0:
+            failures.append(
+                f"{_account_key(a)}: debt account has positive balance "
+                f"{a.balance_cents}. Debt is negative in our model, so a "
+                f"positive balance means the adapter did not flip the sign, "
+                f"and net worth is off by {2 * a.balance_cents}."
+            )
 
     return failures
 
