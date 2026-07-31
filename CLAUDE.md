@@ -20,11 +20,11 @@ $env:DATA_SOURCE="csv"; ./venv/Scripts/python.exe main.py   # render from fixtur
 other:
 
 - **pytest** (`pytest.ini`, `testpaths = tests`, `python_files = test_*.py`) runs the unit
-  tests — `tests/test_money.py` and `tests/test_csv_source.py`, which covers the two CSV
-  failures a render is blind to: an inverted `SIGN`, and an unstable id.
-  Adopted at step 4.3, ahead of need, because the
-  4.5 adapter conformance test is natively a `@pytest.mark.parametrize` over adapters and
-  it is not worth learning pytest and designing that contract in the same sitting.
+  tests: `test_money.py`, `test_csv_source.py` (the two CSV failures a render is blind to —
+  an inverted `SIGN` and an unstable id), and `test_conformance.py` (the adapter contract).
+  Adopted at step 4.3 ahead of need, because the conformance test is natively a
+  `@pytest.mark.parametrize` over adapters and it was not worth learning pytest and
+  designing that contract in the same sitting.
   `pythonpath = .` in `pytest.ini` is what puts the project root on `sys.path`; without it
   `import core.money` fails, because pytest only adds `tests/` itself.
 - **`check_baseline.py`** is deliberately **not** collected (its name does not match
@@ -32,6 +32,15 @@ other:
   of `test_` functions). Converting it is churn for no gain today — it works, it is the
   release gate, and its whole design is about controlling the process it runs in. Run it
   separately, and treat `GATE PASSED` as the thing that must be true before a commit.
+
+**`check_structure()` duplicates several conformance assertions on purpose.** The gate has
+to keep working as a standalone script in a process it fully controls; importing shared
+assertions from the test suite would couple the release check to the thing it is supposed
+to be independent of. The assertions are four lines each — the independence is worth more
+than the de-duplication. The split: `check_baseline.py` asks *does the configured source
+still render byte-identically, and is its model intact* (fake only, by definition);
+`test_conformance.py` asks *does every adapter honour the contract*, regardless of
+`DATA_SOURCE` and regardless of whether it renders at all.
 
 No linter and no build step.
 
@@ -104,6 +113,35 @@ adapters/*  →  core/models  →  insights.py  →  main.py
 - **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
   through as an argument so the gate can pin it by passing a `Console`, not by patching a
   global.
+
+### Adding a provider
+
+`tests/test_conformance.py` is what "adding a provider" now means. It holds
+`ALL_SOURCES = [FakeSource(), CsvSource()]` and parametrizes the entire contract over it,
+so a new adapter inherits the full suite by adding **one entry** to that list — ids
+namespaced, unique and reconstructible from their own `SourceRef`; every
+`Transaction.account_id` resolving; amounts `int`; merchants non-empty; debt non-positive;
+currency a real ISO code; dates `date` and not `datetime`; and two fetches producing
+identical ids.
+
+The list holds *instances*, not classes, because constructor shapes differ — `FakeSource()`
+takes nothing, `CsvSource()` a path and an account, Plaid's will take an access token — and
+that list is the one place that knows how to build each one.
+
+Two of those assertions are worth knowing about before writing an adapter:
+
+- **`test_ids_are_exactly_what_make_id_produces`** rebuilds each id from the record's own
+  `SourceRef` rather than picking the string apart. That is stricter than a prefix check:
+  it catches an adapter minting a plausible-looking id under the wrong connection.
+- **`test_the_source_list_covers_every_provider_that_has_an_adapter`** asserts the only
+  `Provider` missing from `ALL_SOURCES` is `PLAID`. When that adapter lands, this test is
+  what tells you to register it instead of letting it sit silently unconformed.
+
+The module pins **both** `DATA_SOURCE` and `CSV_PATH` before importing adapters. It builds
+sources directly rather than through `data_source`, so the env var has no say — but a test
+whose meaning depends on the shell it ran in is worse than no test. `CSV_PATH` is the one
+that actually bites: `CsvSource()` falls back to a *relative* path, so without the pin a
+bare `CsvSource()` only works when pytest is invoked from the project root.
 
 ### IDs
 

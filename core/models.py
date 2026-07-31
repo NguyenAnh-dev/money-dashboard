@@ -213,8 +213,18 @@ def _require_int_cents(value: object, field_name: str) -> None:
 
 
 def _clean_currency(currency: str) -> str:
-    """Normalize to upper-case ISO-4217, so 'usd' and 'USD' never split a group."""
+    """Normalize to upper-case ISO-4217, so 'usd' and 'USD' never split a group.
+
+    LENGTH IS NOT ENOUGH. An earlier version checked only `len == 3`, which let
+    "U$D" and "1 2" through -- and the failure is not a crash but a currency
+    group keyed on garbage, plus `core.money.minor_units` silently falling back
+    to 2 decimal places for it.
+
+    ASCII is part of the check, not pedantry: "ÉUR".isalpha() is True, and a
+    lookalike code would sit alongside the real one as a separate group that
+    reads identically in a table.
+    """
     cleaned = currency.strip().upper()
-    if len(cleaned) != 3:
+    if len(cleaned) != 3 or not (cleaned.isascii() and cleaned.isalpha()):
         raise ValueError(f"currency must be a 3-letter ISO-4217 code, got {currency!r}")
     return cleaned
