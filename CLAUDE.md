@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Use the venv interpreter explicitly — it works identically in PowerShell, cmd, and Git Bash:
 
 ```
-./venv/Scripts/python.exe main.py                           # render the dashboard
+./venv/Scripts/python.exe main.py                           # render the dashboard (fake)
+$env:DATA_SOURCE="csv"; ./venv/Scripts/python.exe main.py   # render from fixtures/bank_export.csv
+
 ./venv/Scripts/python.exe tests/check_baseline.py           # THE gate — run before every commit
 ./venv/Scripts/python.exe tests/check_baseline.py --update  # rewrite the baseline (deliberate only)
 ./venv/Scripts/python.exe -m pytest                         # unit tests
@@ -18,7 +20,9 @@ Use the venv interpreter explicitly — it works identically in PowerShell, cmd,
 other:
 
 - **pytest** (`pytest.ini`, `testpaths = tests`, `python_files = test_*.py`) runs the unit
-  tests — currently `tests/test_money.py`. Adopted at step 4.3, ahead of need, because the
+  tests — `tests/test_money.py` and `tests/test_csv_source.py`, which covers the two CSV
+  failures a render is blind to: an inverted `SIGN`, and an unstable id.
+  Adopted at step 4.3, ahead of need, because the
   4.5 adapter conformance test is natively a `@pytest.mark.parametrize` over adapters and
   it is not worth learning pytest and designing that contract in the same sitting.
   `pythonpath = .` in `pytest.ini` is what puts the project root on `sys.path`; without it
@@ -85,6 +89,15 @@ adapters/*  →  core/models  →  insights.py  →  main.py
   reference implementation of the contract: a class with `fetch_accounts()` /
   `fetch_transactions()`, plus module-level `PROVIDER` and `CONNECTION_ID` constants that
   feed every id it mints. Nothing above this layer learns where data came from.
+  `csv_source.py` adds the crosswalk pattern every future bank copies — `COLUMNS`, `SIGN`,
+  `DATE_FORMAT`, `CURRENCY` as named constants at the top of the file. **`SIGN = -1` is the
+  most dangerous line in the codebase**: the export writes debits negative (OFX
+  convention), our model writes them positive, and an inverted flip has *no visible
+  symptom* — every number still formats, every total still ties, and spending and income
+  have swapped places. It has its own test for that reason. A CSV supplies no category
+  (everything is `Uncategorized`), no balance (`CsvAccount.balance_cents` defaults to 0 —
+  summing the rows would give the period's net change while looking exactly like a
+  balance), and no account identity, which is why that is constructor-supplied.
 - **`insights.py`** — pure analysis over model types. `find_recurring` is charges-only by
   design (skips `amount_cents < 0`, so payroll is excluded) and requires ≥3 distinct
   (year, month) pairs, exactly one charge per month, and every gap within 26–35 days.
@@ -105,6 +118,26 @@ Sources that supply no id of their own (CSV, the fixture) mint one from row *con
 inserted row. Hash the **raw descriptor**, not the normalized merchant: improving the
 merchant cleaner must not move historical ids. Changing `DIGEST_CHARS` rekeys every row
 ever minted.
+
+**The duplicate-row limit.** Two rows with identical content — same date, descriptor,
+amount, account, which is two coffees on one morning, not an error — hash identically,
+because the source recorded nothing that tells them apart. `ContentIdMinter` folds an
+occurrence number into the second and later copies, so the ids are unique and stable *as
+long as the export is*. What that buys and what it does not:
+
+- **Safe:** re-exporting with the duplicates in a different order. They are identical, so
+  permuting them yields the same set of ids. Inserting unrelated rows anywhere is also
+  safe — only the new row gets a new id.
+- **Not safe:** the *count* of duplicates changing. Drop one of three identical charges (a
+  refund, a corrected export) and the survivors renumber, so at Step 5 the upsert rewrites
+  rows instead of removing one.
+- **Arbitrary either way:** which real-world charge is occurrence #0 versus #1. If a user
+  attaches a note or category override to one of them, a re-import can land it on the
+  other. Nothing can fix this from the file alone — the information was never exported.
+
+Treat this as a known ceiling on CSV id stability, not a bug to solve in the minter. The
+real fix is upstream: a source that supplies its own ids (Plaid does) never reaches this
+code path.
 
 ## Project conventions
 
