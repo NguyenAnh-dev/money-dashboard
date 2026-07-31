@@ -1,0 +1,120 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+Use the venv interpreter explicitly — it works identically in PowerShell, cmd, and Git Bash:
+
+```
+./venv/Scripts/python.exe main.py                           # render the dashboard
+./venv/Scripts/python.exe tests/check_baseline.py           # THE gate — run before every commit
+./venv/Scripts/python.exe tests/check_baseline.py --update  # rewrite the baseline (deliberate only)
+./venv/Scripts/python.exe -m pytest                         # unit tests
+./venv/Scripts/python.exe -m pytest tests/test_money.py::test_bare_int_is_whole_units -q
+```
+
+**Two test commands, on purpose.** They cover different things and neither replaces the
+other:
+
+- **pytest** (`pytest.ini`, `testpaths = tests`, `python_files = test_*.py`) runs the unit
+  tests — currently `tests/test_money.py`. Adopted at step 4.3, ahead of need, because the
+  4.5 adapter conformance test is natively a `@pytest.mark.parametrize` over adapters and
+  it is not worth learning pytest and designing that contract in the same sitting.
+  `pythonpath = .` in `pytest.ini` is what puts the project root on `sys.path`; without it
+  `import core.money` fails, because pytest only adds `tests/` itself.
+- **`check_baseline.py`** is deliberately **not** collected (its name does not match
+  `python_files`, and it is a script with a `main()` returning an exit code, not a module
+  of `test_` functions). Converting it is churn for no gain today — it works, it is the
+  release gate, and its whole design is about controlling the process it runs in. Run it
+  separately, and treat `GATE PASSED` as the thing that must be true before a commit.
+
+No linter and no build step.
+
+Dependencies (`requirements.txt`): `rich` at runtime, `pytest` for tests. Nothing under
+`core/`, `adapters/` or `main.py` may import pytest. Python 3.10+ required (`X | None`
+unions).
+
+## The baseline gate
+
+`check_baseline.py` runs two independent checks, and both must pass (`GATE PASSED`):
+
+- **RENDER** — the dashboard must byte-match `tests/baseline/dashboard.txt`.
+- **STRUCTURE** — invariants the rendered text is blind to: ids unique, every
+  `Transaction.account_id` resolves to an `Account.id`, amounts are `int`, merchants
+  non-empty, debt accounts non-positive.
+
+STRUCTURE exists because the dashboard **never joins a transaction to its account**.
+Namespacing account ids while leaving `transaction.account_id` bare renders a
+byte-identical screen on a completely broken model. Never assume a passing render means
+the model is intact.
+
+Determinism is achieved by rendering in-process through a `Console` with `file=StringIO`,
+`width=80`, `legacy_windows=False`, `no_color=True` — pinning encoding, width, and colour.
+Do **not** replace this with `main.py > file` + `diff`: `rich` picks ASCII vs Unicode box
+characters from the *output encoding* (Windows cp1252 redirect → ASCII, Linux → Unicode),
+subtracts a column on Windows, and PowerShell's `diff` is `Compare-Object`. See
+`tests/baseline/README.md` for the full rationale, including the trailing-whitespace and
+`.gitattributes` (`-text`) traps that can silently rewrite the baseline.
+
+Only run `--update` on a change that predicted its own render diff in advance.
+
+## Architecture
+
+Data flows strictly one direction, and the layering is the point:
+
+```
+adapters/*  →  core/models  →  insights.py  →  main.py
+(translate)    (vocabulary)    (analysis)      (rich rendering)
+                    ↑
+              data_source.py (selector, reads DATA_SOURCE env var per call)
+```
+
+- **`core/models.py`** — the app's own vocabulary. **No third-party imports, ever**; the
+  moment `plaid` or `requests` appears there the model describes a vendor instead of the
+  domain. Invariants enforced in `__post_init__`: money is integer minor units (never
+  float — `_require_int_cents` rejects floats and bools), **positive = money left the
+  account**, ids are namespaced by provider, `merchant` is never empty.
+- **`core/money.py`** — the single place amounts get formatted (and, later, parsed). Handles
+  per-currency minor units (JPY 0, KWD 3). Deliberately no thousands separators — adding
+  them moves the baseline.
+- **`data_source.py`** — selector only. Reads `DATA_SOURCE` **per call**, not at import, so
+  tests can change it; imports the adapter *inside* the branch so choosing `fake` never
+  loads a provider SDK. An unknown value raises rather than falling back to fake.
+- **`adapters/`** — each source translates its records into `core.models`. `fake.py` is the
+  reference implementation of the contract: a class with `fetch_accounts()` /
+  `fetch_transactions()`, plus module-level `PROVIDER` and `CONNECTION_ID` constants that
+  feed every id it mints. Nothing above this layer learns where data came from.
+- **`insights.py`** — pure analysis over model types. `find_recurring` is charges-only by
+  design (skips `amount_cents < 0`, so payroll is excluded) and requires ≥3 distinct
+  (year, month) pairs, exactly one charge per month, and every gap within 26–35 days.
+- **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
+  through as an argument so the gate can pin it by passing a `Console`, not by patching a
+  global.
+
+### IDs
+
+Every id is `provider:connection_id:provider_id`, built by `core.models.make_id`, with
+segments percent-escaped (`%` first, then `:`) so concatenation stays injective; empty
+segments raise. **Never parse an id** — read provenance from the `SourceRef` instead.
+Keep it case-sensitive when it becomes a SQLite primary key (`COLLATE NOCASE` would merge
+distinct records).
+
+Sources that supply no id of their own (CSV, the fixture) mint one from row *content* via
+`adapters/fingerprint.py` — never from row position, which would rekey everything below an
+inserted row. Hash the **raw descriptor**, not the normalized merchant: improving the
+merchant cleaner must not move historical ids. Changing `DIGEST_CHARS` rekeys every row
+ever minted.
+
+## Project conventions
+
+- This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 are
+  **diff-free refactors** — they move code and must leave the render byte-identical. The
+  hardcoded `v0.1 - fake data` header in `main.py` must not be touched before 4.6 for
+  exactly this reason. Step 5 introduces SQLite, which is why id stability matters now.
+- Comments here explain *why*, often at length, and frequently name the specific bug a
+  line prevents. Match that register when editing; don't strip it as verbose.
+- The fixture in `adapters/fake.py` has traps baked in on purpose (Chipotle at a constant
+  $14.42 on varying days; Amazon descriptors with per-order codes that defeat naive string
+  grouping; Uber trips vs Uber Eats). Don't "clean" them up.
+- `docs/DATA_MODEL.md` is referenced from several files but does not exist yet.

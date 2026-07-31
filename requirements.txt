@@ -1,3 +1,9 @@
 # Requires Python 3.10+ -- the codebase uses `X | None` unions.
 # Developed and tested against 3.13.
 rich==15.0.0
+
+# Test-only. Kept in the same file rather than a requirements-dev.txt because
+# there is one environment here (./venv) and one person in it; a split would be
+# two files to forget to install. `rich` is the only RUNTIME dependency --
+# nothing under core/, adapters/ or main.py may import pytest.
+pytest==9.1.1
