@@ -51,6 +51,12 @@ def find_recurring(transactions):
     for txn in transactions:
         if txn.amount_cents < 0:      # income, not a charge
             continue
+        # A pending charge's amount is still provisional -- a card auth posts at
+        # a different number all the time (tip, fuel hold, currency). Include it
+        # and the detector invents a price change, which is the ONE thing this
+        # feature exists to report. Wait for it to settle.
+        if txn.pending:
+            continue
         by_merchant.setdefault(txn.merchant, []).append(txn)
 
     found = []

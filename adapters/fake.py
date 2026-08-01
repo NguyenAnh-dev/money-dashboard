@@ -160,6 +160,33 @@ class FakeSource:
              biggest thing that will break when you swap in real Plaid data.
           3. Uber trips and Uber Eats share a merchant prefix but land in
              different categories.
+          4. A PENDING Starbucks on 2026-07-30. find_recurring skips it (a
+             pending amount is provisional, and including it fabricates the
+             price change this detector exists to report); every other view
+             counts it, so it is in the spending total and the count.
+
+        THE AMEX PAYMENT IS A TRANSFER, AND IT IS WRONG ON PURPOSE:
+          Money leaves acc_1 (checking) on the 25th of all three months to pay
+          the acc_2 card. The amounts VARY DELIBERATELY -- $512.80, $439.65,
+          $682.04 -- because you pay what you spent, and that variance is the
+          sharpest way to see the problem: the recurring table reports
+          "+$242.39" against it, i.e. a price-rise alert on a card payment.
+          A flat amount would hide that behind an empty Change column. Three
+          known defects follow, all of which stay until 4.8 introduces transfer
+          handling:
+
+            - It is DETECTED AS A FIFTH SUBSCRIPTION. Monthly, one charge per
+              month, gaps of 31 and 32 days -- it satisfies every rule the
+              detector has. Nothing in the model yet says "this is a move
+              between two accounts I own", so the detector cannot know.
+            - It DOUBLE-COUNTS SPENDING. The Amex purchases already counted
+              when they were charged; paying the card counts them again, so
+              the Transfer category is $1634.49 of money that was never spent
+              -- and it now outranks Groceries as the top spending category.
+            - Its PRICE-CHANGE ALERT IS MEANINGLESS. A subscription going up
+              $242.39 is worth a warning; a card payment going up $242.39 just
+              means you bought more last month. The delta is real arithmetic
+              on a comparison that should never have been made.
         """
         # Ids are derived from each row's CONTENT, not its position -- see
         # adapters/fingerprint.py for why txn_001.. is a trap. The practical
@@ -170,19 +197,27 @@ class FakeSource:
 
         rows: list[tuple] = []
 
-        def add(when, name, merchant, amount_cents, category, account="acc_1"):
+        def add(when, name, merchant, amount_cents, category, account="acc_1",
+                pending=False):
             # The RAW descriptor and the bare provider account id go into the
-            # hash; `merchant` and `category` stay out of it deliberately. Both
-            # are OUR derived values, and the day the merchant cleaner improves
-            # is not the day every historical id should move.
+            # hash; `merchant`, `category` and `pending` stay out of it
+            # deliberately. The first two are OUR derived values, and the day
+            # the merchant cleaner improves is not the day every historical id
+            # should move. `pending` is worse: it flips to False on settle, so
+            # hashing it would rekey the row exactly when it posts -- turning
+            # the Step 5 upsert into a duplicate.
             provider_id = minter.mint(when.isoformat(), name, amount_cents, account)
             rows.append((provider_id, when, name, merchant, amount_cents,
-                         category, _ns(account)))
+                         category, _ns(account), pending))
 
         # -----------------------------------------------------------------
         # RECURRING -- these are the signal your detector must find
         # -----------------------------------------------------------------
         tmobile_cents = {5: 8431, 6: 8431, 7: 9177}   # July had a data overage
+
+        # You pay what you spent, so a card payment is never the same twice.
+        # That variance is the demonstration -- see the docstring.
+        amex_payment_cents = {5: 51280, 6: 43965, 7: 68204}
 
         for month in (5, 6, 7):
             add(_posts_on(2026, month, 4), "SPOTIFY P0A1B2C3",
@@ -198,6 +233,12 @@ class FakeSource:
             # Same merchant, same cadence, DIFFERENT amount each month.
             add(_posts_on(2026, month, 16), "T-MOBILE PCS SVC 800-937-8997",
                 "T-Mobile", tmobile_cents[month], "Bills & Utilities", "acc_1")
+
+            # A TRANSFER, not spending -- see the docstring. Anchored to the
+            # 25th, clear of the 4/12/16/20 anchors above so no two recurring
+            # rows share a billing day.
+            add(_posts_on(2026, month, 25), "AMEX EPAYMENT ACH PMT 1234",
+                "Amex Payment", amex_payment_cents[month], "Transfer", "acc_1")
 
             # --- income: monthly, but NOT a target of find_recurring (see docstring) ---
             add(date(2026, month, 1), "ACME CORP DIR DEP PPD ID:1234567890",
@@ -269,6 +310,9 @@ class FakeSource:
         add(date(2026, 7, 25), "WHOLEFDS MKT #10259",        "Whole Foods",   8819, "Groceries",    "acc_1")
         add(date(2026, 7, 27), "CHIPOTLE 2094",              "Chipotle",      1694, "Food & Drink", "acc_2")
         add(date(2026, 7, 28), "STARBUCKS STORE 08842",      "Starbucks",      675, "Food & Drink", "acc_2")
+        # Still authorized, not settled. The amount can still move, which is why
+        # find_recurring skips it; everything else counts it as real money.
+        add(date(2026, 7, 30), "STARBUCKS STORE 08842",      "Starbucks",      675, "Food & Drink", "acc_2", pending=True)
         add(date(2026, 7, 29), "CVS/PHARM 04412 Q10",        "CVS Pharmacy",   987, "Health",       "acc_1")
         add(date(2026, 7, 31), "STARBUCKS STORE 08842",      "Starbucks",      545, "Food & Drink", "acc_2")
 
@@ -288,8 +332,8 @@ class FakeSource:
                 amount_cents=amount_cents,
                 category=category,
                 currency="USD",
-                pending=False,
+                pending=pending,
             )
             for provider_id, when, name, merchant, amount_cents, category,
-            account_id in rows
+            account_id, pending in rows
         ]

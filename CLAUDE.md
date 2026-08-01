@@ -110,6 +110,13 @@ adapters/*  →  core/models  →  insights.py  →  main.py
 - **`insights.py`** — pure analysis over model types. `find_recurring` is charges-only by
   design (skips `amount_cents < 0`, so payroll is excluded) and requires ≥3 distinct
   (year, month) pairs, exactly one charge per month, and every gap within 26–35 days.
+  It also **skips `pending`** — a decision, not an oversight. A pending charge's amount is
+  provisional (tip adjustments, fuel holds, FX), so a pending row compared against its own
+  settled history manufactures a price change, which is the one thing this detector exists
+  to report. A subscription is worth detecting one month late; a fabricated "your price
+  went up" alert is worth nothing. Pending rows still count everywhere else — spending
+  totals, the recent list, the transaction count — because the money is committed even
+  when the number is not final.
 - **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
   through as an argument so the gate can pin it by passing a `Console`, not by patching a
   global.
@@ -188,4 +195,34 @@ code path.
 - The fixture in `adapters/fake.py` has traps baked in on purpose (Chipotle at a constant
   $14.42 on varying days; Amazon descriptors with per-order codes that defeat naive string
   grouping; Uber trips vs Uber Eats). Don't "clean" them up.
+- **The recurring table has FIVE rows, and the fifth one is wrong on purpose.** The monthly
+  Amex card payment is a *transfer* between two accounts the user owns, and the model has
+  no way to say so yet, so it satisfies every rule the detector has: monthly, one charge
+  per month, gaps of 31 and 32 days. Three visible consequences, all deliberate — it is
+  detected as a fifth subscription; its $1634.49 double-counts spending already counted
+  when the Amex purchases posted, and now outranks Groceries as the top category; and its
+  varying amounts produce a `+$242.39` price-rise alert, which is meaningless for a card
+  payment. **4.8 introduces transfer handling and the count returns to four.** Until then,
+  a "bug report" about any of the three is the fixture working. Don't fix it by deleting
+  the row — that discards the demonstration 4.8 is built against.
 - `docs/DATA_MODEL.md` is referenced from several files but does not exist yet.
+
+## Deferred, on purpose
+
+- **Pending → posted reconciliation is Step 5 work**, not now. Today a pending row is just
+  a row with a flag: nothing reconciles it when it settles, because with no database there
+  is nothing to reconcile *against* — each run rebuilds every transaction from scratch. At
+  Step 5 the same charge arrives twice, pending then posted, and the id decides what
+  happens. Our content-hash ids deliberately exclude `pending` (see `adapters/fake.py`'s
+  `add()`), so a row that only flips its flag keeps its id and the upsert updates it. What
+  is *not* solved: a settling charge whose **amount or date moves** — a tip added, an
+  authorization posting a day later — rehashes to a new id and inserts a second row
+  alongside the stale pending one. Plaid sidesteps this by supplying its own id and
+  swapping it on settle; a CSV cannot. Decide the strategy when the database exists, not
+  by pre-emptively weakening the hash.
+- **The `pending` skip in `find_recurring` is currently unenforced.** The fixture's only
+  pending row is a Starbucks, which `find_recurring` already rejects for having 15 charges
+  across 3 months — so deleting `if txn.pending: continue` changes no output and no test
+  fails. Making it bite needs a pending charge on an otherwise-clean monthly subscription,
+  asserted in a unit test rather than through the render. Worth doing before anyone trusts
+  the rule.

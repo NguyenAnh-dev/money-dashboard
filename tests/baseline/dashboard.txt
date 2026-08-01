@@ -13,45 +13,47 @@
 │ $5751.72                       │
 ╰────────────────────────────────╯
 
-                        Recurring Charges                        
-┏━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┓
-┃ Merchant       ┃ Amount ┃ Billing day ┃ Last charged ┃ Change ┃
-┡━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━┩
-│ T-Mobile       │ $91.77 │          16 │ 2026-07-16   │ +$7.46 │
-│ Planet Fitness │ $24.99 │          20 │ 2026-07-20   │        │
-│ Netflix        │ $17.99 │          12 │ 2026-07-13   │ +$2.50 │
-│ Spotify        │ $10.99 │           4 │ 2026-07-06   │        │
-└────────────────┴────────┴─────────────┴──────────────┴────────┘
+                         Recurring Charges                          
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Merchant       ┃  Amount ┃ Billing day ┃ Last charged ┃   Change ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ Amex Payment   │ $682.04 │          25 │ 2026-07-27   │ +$242.39 │
+│ T-Mobile       │  $91.77 │          16 │ 2026-07-16   │   +$7.46 │
+│ Planet Fitness │  $24.99 │          20 │ 2026-07-20   │          │
+│ Netflix        │  $17.99 │          12 │ 2026-07-13   │   +$2.50 │
+│ Spotify        │  $10.99 │           4 │ 2026-07-06   │          │
+└────────────────┴─────────┴─────────────┴──────────────┴──────────┘
 
-     Spending by Category      
-┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
-┃ Category          ┃  Amount ┃
-┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
-│ Groceries         │ $759.16 │
-│ Shopping          │ $352.16 │
-│ Travel            │ $342.00 │
-│ Food & Drink      │ $322.57 │
-│ Bills & Utilities │ $260.39 │
-│ Transport         │ $164.45 │
-│ Health            │ $125.45 │
-│ Entertainment     │  $81.94 │
-└───────────────────┴─────────┘
+      Spending by Category      
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Category          ┃   Amount ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ Transfer          │ $1634.49 │
+│ Groceries         │  $759.16 │
+│ Shopping          │  $352.16 │
+│ Travel            │  $342.00 │
+│ Food & Drink      │  $329.32 │
+│ Bills & Utilities │  $260.39 │
+│ Transport         │  $164.45 │
+│ Health            │  $125.45 │
+│ Entertainment     │   $81.94 │
+└───────────────────┴──────────┘
 
-            Recent Transactions (latest 10)            
-┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┓
-┃ Date       ┃ Merchant       ┃ Category     ┃ Amount ┃
-┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━┩
-│ 2026-07-31 │ Starbucks      │ Food & Drink │  $5.45 │
-│ 2026-07-29 │ CVS Pharmacy   │ Health       │  $9.87 │
-│ 2026-07-28 │ Starbucks      │ Food & Drink │  $6.75 │
-│ 2026-07-27 │ Chipotle       │ Food & Drink │ $16.94 │
-│ 2026-07-25 │ Whole Foods    │ Groceries    │ $88.19 │
-│ 2026-07-24 │ Shake Shack    │ Food & Drink │ $18.85 │
-│ 2026-07-23 │ Amazon         │ Shopping     │ $45.99 │
-│ 2026-07-21 │ Trader Joes    │ Groceries    │ $62.18 │
-│ 2026-07-20 │ Planet Fitness │ Health       │ $24.99 │
-│ 2026-07-18 │ Uber Eats      │ Food & Drink │ $24.60 │
-└────────────┴────────────────┴──────────────┴────────┘
+           Recent Transactions (latest 10)            
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Date       ┃ Merchant     ┃ Category     ┃  Amount ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ 2026-07-31 │ Starbucks    │ Food & Drink │   $5.45 │
+│ 2026-07-30 │ Starbucks    │ Food & Drink │   $6.75 │
+│ 2026-07-29 │ CVS Pharmacy │ Health       │   $9.87 │
+│ 2026-07-28 │ Starbucks    │ Food & Drink │   $6.75 │
+│ 2026-07-27 │ Amex Payment │ Transfer     │ $682.04 │
+│ 2026-07-27 │ Chipotle     │ Food & Drink │  $16.94 │
+│ 2026-07-25 │ Whole Foods  │ Groceries    │  $88.19 │
+│ 2026-07-24 │ Shake Shack  │ Food & Drink │  $18.85 │
+│ 2026-07-23 │ Amazon       │ Shopping     │  $45.99 │
+│ 2026-07-21 │ Trader Joes  │ Groceries    │  $62.18 │
+└────────────┴──────────────┴──────────────┴─────────┘
 
-72 transactions across 3 accounts at 3 institutions
+76 transactions across 3 accounts at 3 institutions
 
