@@ -120,4 +120,20 @@ def main(console=None):
 
 
 if __name__ == "__main__":
+    # .env is loaded HERE, in the __main__ block, and nowhere else.
+    #
+    # Not at import: `tests/check_baseline.py` imports this module and calls
+    # main(console) directly, and a module-level load_dotenv() would let a
+    # stray DATA_SOURCE=plaid in someone's .env reach the gate. Guarding it
+    # this way means the gate cannot load .env at all, rather than relying on
+    # load_dotenv's no-override behaviour to save it. (It does not override --
+    # the gate pins DATA_SOURCE before importing anything -- but two defences
+    # cost one line, and the render being deterministic is the whole point.)
+    #
+    # Not in core/ or adapters/ either: reading process-wide config is an
+    # entry-point job. An adapter that loads .env on import is an adapter you
+    # cannot instantiate twice with different config.
+    from dotenv import load_dotenv
+    load_dotenv()
+
     main()

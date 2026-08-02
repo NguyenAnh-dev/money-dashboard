@@ -2,8 +2,25 @@
 # Developed and tested against 3.13.
 rich==15.0.0
 
+# Plaid (Step 4.7). RUNTIME, but only on the `plaid` branch: data_source.py
+# imports the adapter INSIDE the branch, so `DATA_SOURCE=fake` never loads any
+# of this. That matters -- it is a large SDK with its own transitive deps
+# (urllib3, python-dateutil, six, nulltype), and none of them should be
+# imported to render a list of tuples.
+#
+# Pinned exactly, like everything else here. The v9+ API shape (Configuration /
+# ApiClient / PlaidApi + one request MODEL class per endpoint) is completely
+# different from the pre-9 `plaid.Client`, so any snippet found online has to
+# be checked against this version before it means anything.
+plaid-python==42.0.0
+
+# Reads .env into os.environ so DATA_SOURCE / PLAID_* can be set per machine
+# without exporting them by hand. Never commits: .env is gitignored, and
+# .env.example is the committed record of which keys exist.
+python-dotenv==1.2.2
+
 # Test-only. Kept in the same file rather than a requirements-dev.txt because
 # there is one environment here (./venv) and one person in it; a split would be
-# two files to forget to install. `rich` is the only RUNTIME dependency --
-# nothing under core/, adapters/ or main.py may import pytest.
+# two files to forget to install. Nothing under core/, adapters/ or main.py may
+# import pytest.
 pytest==9.1.1
