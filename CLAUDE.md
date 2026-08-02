@@ -70,6 +70,18 @@ subtracts a column on Windows, and PowerShell's `diff` is `Compare-Object`. See
 `tests/baseline/README.md` for the full rationale, including the trailing-whitespace and
 `.gitattributes` (`-text`) traps that can silently rewrite the baseline.
 
+That pins the encoding on the way **in**. The gate also reconfigures `sys.stdout` **and
+`sys.stderr`** to `utf-8, errors="replace"` at import, which is the same trap arriving on
+the way **out**: the failure diff echoes the rendered dashboard, it is full of `│` and
+`━`, and Windows stdout is cp1252 — so until 4.8 a failing gate printed `RENDER FAIL` and
+then died of `UnicodeEncodeError` before showing a single line of what changed. The check
+was right; only its report was unprintable. `stderr` is included because adapter errors
+interpolate row content into their messages (`_clean_currency` reports the bad code,
+`'ÉUR'`), so without it a failure on a non-ASCII value dies on the error *about* the
+failure. It is `hasattr`-guarded — `reconfigure` is a `TextIOWrapper` method and is absent
+when something has already replaced the stream (pytest capture). Do not "simplify" this
+away, and do not reach for `PYTHONIOENCODING=utf-8`; that was the workaround it replaced.
+
 Only run `--update` on a change that predicted its own render diff in advance.
 
 ## Architecture
@@ -88,6 +100,13 @@ adapters/*  →  core/models  →  insights.py  →  main.py
   domain. Invariants enforced in `__post_init__`: money is integer minor units (never
   float — `_require_int_cents` rejects floats and bools), **positive = money left the
   account**, ids are namespaced by provider, `merchant` is never empty.
+  `TransactionKind` (4.8) says *what a transaction is* as opposed to what it bought, and
+  it exists because `category` is a **display string each source spells differently** —
+  the fixture writes "Transfer", Plaid "Transfer In"/"Transfer Out", a CSV
+  "Uncategorized", so keying behaviour off that string works on one source and silently
+  fails on the other two. Analysis reads the enum, never the text. It **defaults to
+  `PURCHASE`**, which is what lets a source that cannot classify neither break nor guess
+  while every consumer still reads a non-null value on every row.
 - **`core/money.py`** — the single place amounts get formatted (and, later, parsed). Handles
   per-currency minor units (JPY 0, KWD 3). Deliberately no thousands separators — adding
   them moves the baseline.
@@ -98,6 +117,15 @@ adapters/*  →  core/models  →  insights.py  →  main.py
   reference implementation of the contract: a class with `fetch_accounts()` /
   `fetch_transactions()`, plus module-level `PROVIDER` and `CONNECTION_ID` constants that
   feed every id it mints. Nothing above this layer learns where data came from.
+  Each adapter sets `kind`: the fixture tags its Amex payments `TRANSFER` and payroll
+  `INCOME`; Plaid maps a `KINDS` dict keyed on the **raw**
+  `personal_finance_category.primary` constants (`TRANSFER_IN`/`TRANSFER_OUT`/
+  `LOAN_PAYMENTS` → `TRANSFER`, `INCOME`, `BANK_FEES` → `FEE`), never on the display
+  strings `category_of` produces; CSV writes `PURCHASE` for every row, which is a **known
+  limitation, not a stub** — a three-column export has no counterparty and no knowledge of
+  any other account, so a transfer is genuinely unknowable from the file, and
+  pattern-matching descriptors would trade a visible overcount for an invisible undercount
+  (a false positive *removes* real spending from the totals).
   `csv_source.py` adds the crosswalk pattern every future bank copies — `COLUMNS`, `SIGN`,
   `DATE_FORMAT`, `CURRENCY` as named constants at the top of the file. **`SIGN = -1` is the
   most dangerous line in the codebase**: the export writes debits negative (OFX
@@ -130,6 +158,17 @@ adapters/*  →  core/models  →  insights.py  →  main.py
   went up" alert is worth nothing. Pending rows still count everywhere else — spending
   totals, the recent list, the transaction count — because the money is committed even
   when the number is not final.
+  Both `find_recurring` and `spending_by_category` **skip `TransactionKind.TRANSFER`**
+  (4.8). A card payment moves money between two accounts the user owns: the purchases were
+  already counted when they posted, so counting the payment too puts money that was never
+  spent into a table that claims to show spending, and a payment that varies month to month
+  satisfies every rule the detector has while producing a meaningless price-rise alert.
+  **The transfer/pending asymmetry is deliberate**: a transfer is excluded from spending, a
+  pending row is included. The rule is whether the money is *real*, not whether the number
+  is *final* — pending is committed money at a provisional amount (excluded only from
+  `find_recurring`, where the provisional amount would fabricate a price change), while a
+  transfer is a final amount that was never spending at all. Opposite reasons, so neither
+  skip is precedent for the other.
 - **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
   through as an argument so the gate can pin it by passing a `Console`, not by patching a
   global.
@@ -172,6 +211,20 @@ list. It participates as **two** entries instead:
   populated — otherwise every test run would hit the network.
 
 A skipped test reads as green, which is why Plaid does not participate by skipping alone.
+
+**The Plaid sandbox is a poor test of `find_recurring`, and it is worth knowing before
+reading anything into a Plaid render.** Sandbox data is generated from a MONTHLY TEMPLATE:
+the 48 transactions are 16 distinct (merchant, amount) pairs repeated exactly three times,
+one per month, on ~30-day gaps. So almost every eligible merchant satisfies the detector by
+construction — 8 of the 9 flagged, the only rejection being Uber, and only because it bills
+twice a month rather than once. Four of them sit at exactly $500.00.
+
+Two consequences. A high detection count there means the generator repeats itself, not that
+the detector works. And **no amount ever varies**, so `previous_cents` is always `None`,
+the Change column is always empty, and the price-change path — the whole reason
+`find_recurring` reaches back past `amounts[-2]` — is never exercised at all. The fake
+fixture is the detector's real test, deliberately: it carries the varying T-Mobile bill, the
+Netflix rise, and the Chipotle-at-a-constant-$14.42 trap. Judge detector changes there.
 
 **Re-recording the fixture** (`scripts/get_plaid_token.py --record-only`) churns the whole
 file: sandbox regenerates data per Item with dates relative to the recording date. Record
@@ -234,16 +287,16 @@ code path.
 - The fixture in `adapters/fake.py` has traps baked in on purpose (Chipotle at a constant
   $14.42 on varying days; Amazon descriptors with per-order codes that defeat naive string
   grouping; Uber trips vs Uber Eats). Don't "clean" them up.
-- **The recurring table has FIVE rows, and the fifth one is wrong on purpose.** The monthly
-  Amex card payment is a *transfer* between two accounts the user owns, and the model has
-  no way to say so yet, so it satisfies every rule the detector has: monthly, one charge
-  per month, gaps of 31 and 32 days. Three visible consequences, all deliberate — it is
-  detected as a fifth subscription; its $1634.49 double-counts spending already counted
-  when the Amex purchases posted, and now outranks Groceries as the top category; and its
-  varying amounts produce a `+$242.39` price-rise alert, which is meaningless for a card
-  payment. **4.8 introduces transfer handling and the count returns to four.** Until then,
-  a "bug report" about any of the three is the fixture working. Don't fix it by deleting
-  the row — that discards the demonstration 4.8 is built against.
+- **The recurring table has FOUR rows as of 4.8, and it had five before.** The monthly Amex
+  card payment is a *transfer* between two accounts the user owns; through 4.7 the model had
+  no way to say so, so it satisfied every rule the detector has — monthly, one charge per
+  month, gaps of 31 and 32 days — and produced three visible defects: a fifth "subscription",
+  $1634.49 of double-counted spending outranking Groceries as the top category, and a
+  meaningless `+$242.39` price-rise alert on a card payment. All three came from one missing
+  fact, and `kind=TransactionKind.TRANSFER` supplies it. **The row itself stays** — it is
+  still in the transaction count (76) and still in the recent list, because the payment did
+  happen, and it is the only row proving the skip works end to end. Deleting it discards the
+  demonstration rather than fixing anything.
 - `docs/DATA_MODEL.md` is referenced from several files but does not exist yet.
 
 ## Deferred, on purpose
@@ -270,4 +323,33 @@ code path.
   across 3 months — so deleting `if txn.pending: continue` changes no output and no test
   fails. Making it bite needs a pending charge on an otherwise-clean monthly subscription,
   asserted in a unit test rather than through the render. Worth doing before anyone trusts
-  the rule.
+  the rule. Contrast the `TRANSFER` skip added beside it, which *is* enforced: the fixture's
+  Amex payment would be reported as a subscription without it, and
+  `test_no_transfer_ever_reaches_the_recurring_table` states that over the detector's
+  output rather than by re-checking the `continue`.
+- **Plaid's `LOAN_PAYMENTS → TRANSFER` is a judgment call, and the one mapping that will
+  get a bug report.** The visible symptom, stated up front because someone will ask: **a
+  mortgage or car payment disappears from Spending by Category.** That is intended.
+
+  What makes it defensible is what the bucket contains. Plaid files
+  `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` under this primary, so it is dominated by card
+  payments — exactly the Amex double-count `TRANSFER` exists to stop. In the recorded
+  payload it is 100% card payments and zero mortgages.
+
+  A mortgage is the genuinely contested case and *is* different from a card payment: the
+  principal is net-worth-neutral (asset down, liability down together), but the **interest
+  is a real expense** — money that leaves and never returns, no different from a fee. Plaid
+  sends one amount with no amortization split, so the two cannot be separated. One bucket
+  or nothing.
+
+  We chose `TRANSFER`, and **not** because principal usually dominates — early in a mortgage
+  term the opposite is true. The reason is which error costs more: `PURCHASE` restores the
+  card-payment double-count for the *majority* of the bucket and inflates the spending table
+  for everyone, while `TRANSFER` understates spending only for someone paying a loan we
+  cannot see, and only by its interest portion.
+
+  The escape hatch exists and is deliberately unused: `detailed` separates
+  `_MORTGAGE_PAYMENT` / `_CAR_PAYMENT` / `_STUDENT_LOAN_PAYMENT` from
+  `_CREDIT_CARD_PAYMENT`, so this one primary can be keyed on `detailed` when it matters. It
+  buys nothing today and still would not fix the real gap — the interest belongs in spending
+  and no field says how much of the amount it is.

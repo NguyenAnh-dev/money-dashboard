@@ -68,11 +68,13 @@ from core.models import (                          # noqa: E402
     Provider,
     SourceRef,
     Transaction,
+    TransactionKind,
     _clean_currency,
     _escape_segment,
     _require_int_cents,
     make_id,
 )
+from insights import find_recurring                # noqa: E402  (after the pins)
 
 #: EVERY adapter. Adding a provider means adding one entry here and nothing
 #: else -- the whole file below is parameterized over this list, so a new
@@ -344,6 +346,64 @@ def test_dates_are_date_objects_not_strings_or_datetimes(source):
 def test_pending_is_a_bool(source):
     for txn in source.fetch_transactions():
         assert isinstance(txn.pending, bool)
+
+
+@parametrized
+def test_kind_is_a_transaction_kind(source):
+    """`kind` drives two skips in insights.py, so a row carrying anything else
+    is a row those skips cannot reason about.
+
+    `is` against enum members rather than `isinstance`, because TransactionKind
+    has a `str` mixin: the literal "transfer" is an `str` and would pass an
+    isinstance check against `str`, while `txn.kind is TransactionKind.TRANSFER`
+    in insights.py is False for it. The identity comparison is what the
+    consumers actually do, so it is what this asserts.
+    """
+    members = list(TransactionKind)
+    for txn in source.fetch_transactions():
+        assert any(txn.kind is member for member in members), (
+            f"{txn.id}: kind is {txn.kind!r} ({type(txn.kind).__name__}); "
+            f"insights.py compares it with `is` against a TransactionKind "
+            f"member, which an equal-but-not-identical value silently fails"
+        )
+
+
+def test_the_fixtures_card_payments_are_tagged_as_transfers():
+    """The one row the whole feature was built against.
+
+    Named on the FIXTURE rather than parameterized, because it is a fact about
+    what fake.py contains, not about the contract: the Amex payment is a move
+    between two accounts the user owns, and through 4.7 the model had no way to
+    say so. If this stops holding, the recurring table goes back to five rows
+    and Spending by Category regains $1634.49 that was never spent -- both of
+    which a passing render happily displays.
+    """
+    transfers = [t for t in FakeSource().fetch_transactions()
+                 if t.kind is TransactionKind.TRANSFER]
+
+    assert {t.merchant for t in transfers} == {"Amex Payment"}
+    assert len(transfers) == 3, "one card payment per month, May-July"
+    assert sum(t.amount_cents for t in transfers) == 163449
+
+
+@parametrized
+def test_no_transfer_ever_reaches_the_recurring_table(source):
+    """Stated over the OUTPUT, not by re-checking the skip.
+
+    A test that asserts `if txn.kind is TRANSFER: continue` exists is a test of
+    the source text; this asserts the property that matters -- that nothing the
+    detector reports is a transfer -- so it keeps holding if the skip moves, and
+    fails if a later refactor drops it.
+    """
+    transactions = source.fetch_transactions()
+    transfer_merchants = {t.merchant for t in transactions
+                          if t.kind is TransactionKind.TRANSFER}
+
+    reported = {c.merchant for c in find_recurring(transactions)}
+    assert not (reported & transfer_merchants), (
+        f"{_source_name(source)}: {sorted(reported & transfer_merchants)} is a "
+        f"transfer being reported as a subscription"
+    )
 
 
 # ---------------------------------------------------------------------------

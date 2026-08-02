@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import date
 
+from core.models import TransactionKind
+
 MIN_MONTHS = 3
 MIN_GAP_DAYS = 26
 MAX_GAP_DAYS = 35
@@ -42,6 +44,21 @@ def total_balance(accounts):
 def spending_by_category(transactions):
     result = {}
     for txn in transactions:
+        # A transfer is not spending. Paying the Amex card moves money between
+        # two accounts the user owns; the purchases were already counted when
+        # they posted, so counting the payment too reports money that was never
+        # spent -- $1634.49 of it in the fixture, enough to outrank Groceries as
+        # the top category in a table that claims to show spending.
+        #
+        # DELIBERATELY ASYMMETRIC WITH `pending`, which IS counted here. The
+        # rule is whether the money is real, not whether the number is final: a
+        # pending charge is committed money at a provisional amount, so it
+        # belongs in a total (and is excluded only from find_recurring, where a
+        # provisional amount would fabricate a price change). A transfer is a
+        # final amount that was never spending at all. Opposite reasons, so
+        # neither skip is evidence for the other.
+        if txn.kind is TransactionKind.TRANSFER:
+            continue
         if txn.amount_cents > 0:
             result[txn.category] = result.get(txn.category, 0) + txn.amount_cents
     return sorted(result.items(), key=lambda x: x[1], reverse=True)
@@ -56,6 +73,15 @@ def find_recurring(transactions):
         # and the detector invents a price change, which is the ONE thing this
         # feature exists to report. Wait for it to settle.
         if txn.pending:
+            continue
+        # A card payment is monthly, is one charge per month, and lands on gaps
+        # of 31 and 32 days -- it satisfies every rule below, honestly, and is
+        # not a subscription. Worse, you pay what you spent, so its varying
+        # amount produces a "+$242.39" price-rise alert that means only that you
+        # bought more last month. This reads `kind`, never the category string:
+        # the fixture spells it "Transfer", Plaid "Transfer Out", a CSV
+        # "Uncategorized".
+        if txn.kind is TransactionKind.TRANSFER:
             continue
         by_merchant.setdefault(txn.merchant, []).append(txn)
 

@@ -49,6 +49,7 @@ from core.models import (
     Provider,
     SourceRef,
     Transaction,
+    TransactionKind,
     make_id,
 )
 from core.money import minor_units, to_cents
@@ -94,6 +95,67 @@ ACCOUNT_TYPE_FAMILIES: dict[str, AccountType] = {
     "loan":       AccountType.LOAN,
     "investment": AccountType.INVESTMENT,
     "brokerage":  AccountType.INVESTMENT,
+}
+
+#: `personal_finance_category.primary` -> our TransactionKind.
+#:
+#: KEYED ON PLAID'S RAW CONSTANTS, not on what `category_of` renders them into.
+#: That function turns "TRANSFER_OUT" into the display string "Transfer Out",
+#: and keying off THAT would make this table depend on a title-casing rule that
+#: exists purely for how a table looks -- change `category_of` to drop
+#: underscores differently and transfer handling would break silently, with a
+#: card payment quietly rejoining the spending total. The raw constants are
+#: Plaid's published enum; the display string is ours to restyle.
+#:
+#: LOAN_PAYMENTS IS A JUDGMENT CALL, not a mechanical mapping, and it is the one
+#: line here that will get a bug report. The other four are obvious.
+#:
+#: What makes it defensible is what the bucket actually CONTAINS. Plaid files
+#: CREDIT_CARD_PAYMENT under LOAN_PAYMENTS, so the primary is dominated by card
+#: payments -- precisely the Amex double-count TRANSFER exists to stop, where the
+#: purchases already counted when they posted. In our own recorded payload the
+#: split is 100% card payments and zero mortgages:
+#:
+#:     LOAN_PAYMENTS_CREDIT_CARD_PAYMENT   "CREDIT CARD 3333 PAYMENT"   x3
+#:     LOAN_PAYMENTS_OTHER_PAYMENT         "AUTOMATIC PAYMENT - THANK"  x3
+#:
+#: THE CONTESTED CASE IS A MORTGAGE, and it is genuinely different from a card
+#: payment. Its principal is net-worth-neutral (the asset drops, the liability
+#: drops with it), but its INTEREST is a real expense -- money that leaves and
+#: never comes back, no different from a fee. Plaid sends ONE amount and no
+#: amortization split, so the two cannot be separated here: it is one bucket or
+#: nothing.
+#:
+#: TRANSFER is the bucket, and NOT because principal usually dominates -- early
+#: in a mortgage term the opposite is true and interest is most of the payment.
+#: The reason is the asymmetry in what each error costs. Mapping this to PURCHASE
+#: restores the card-payment double-count for the MAJORITY of the bucket, which
+#: is the exact defect 4.8 exists to remove, and it inflates a spending table for
+#: everyone. Mapping it to TRANSFER understates spending only for someone paying
+#: a loan we cannot see, by the interest portion of it.
+#:
+#: THE VISIBLE SYMPTOM, so nobody has to rediscover it: a mortgage or car payment
+#: DISAPPEARS from Spending by Category. That is the intended behaviour of this
+#: line, not a bug -- but it is surprising enough to be worth the paragraph.
+#:
+#: The escape hatch exists and is deliberately not taken. `detailed` distinguishes
+#: LOAN_PAYMENTS_MORTGAGE_PAYMENT / _CAR_PAYMENT / _STUDENT_LOAN_PAYMENT from
+#: _CREDIT_CARD_PAYMENT, so this one primary could be keyed on `detailed` the day
+#: it matters. It buys nothing today (the fixture has no mortgage) and it would
+#: still not solve the real problem, which is that the interest portion belongs in
+#: spending and no field in the payload says how much of the amount it is.
+#:
+#: Anything not listed is PURCHASE, matching Transaction's own default. That
+#: means a primary Plaid adds next quarter lands in the spending total rather
+#: than vanishing from it, which is the direction to fail in: an unclassified
+#: charge showing up as ordinary spending is a small inaccuracy, one silently
+#: dropped is money the dashboard never mentions.
+KINDS: dict[str, TransactionKind] = {
+    "TRANSFER_IN":    TransactionKind.TRANSFER,
+    "TRANSFER_OUT":   TransactionKind.TRANSFER,
+    "LOAN_PAYMENTS":  TransactionKind.TRANSFER,
+    "INCOME":         TransactionKind.INCOME,
+    "BANK_FEES":      TransactionKind.FEE,
 }
 
 #: What a transaction with no `personal_finance_category` becomes. Same choice
@@ -291,21 +353,38 @@ def category_of(raw: dict) -> str:
     Plaid deprecated it, and it is a hierarchy in an array, which is a shape
     this app has nowhere to put.
 
-    A NOTE FOR 4.8, because this function looks like it already solves the
-    transfer problem and does not. Plaid does tag transfers -- TRANSFER_IN and
+    THIS FUNCTION LOOKS LIKE IT SOLVES THE TRANSFER PROBLEM AND DOES NOT, which
+    is what 4.8 acted on. Plaid does tag transfers -- TRANSFER_IN and
     TRANSFER_OUT -- but they arrive here as the strings "Transfer In" and
     "Transfer Out", while the fake fixture writes the literal "Transfer" and a
-    CSV writes "Uncategorized". Three sources, three spellings of one idea.
-    Keying transfer handling off the category STRING would therefore work on
-    the fixture and quietly fail on the other two, which is the argument for
-    `kind` being a real enum field each adapter sets deliberately rather than a
-    comparison against display text.
+    CSV writes "Uncategorized". Three sources, three spellings of one idea, so
+    keying behaviour off the category STRING works on the fixture and quietly
+    fails on the other two. That is why `kind` is a real enum field each adapter
+    sets deliberately -- see `kind_of` below, and note it reads Plaid's RAW
+    constants rather than the display text this function returns.
     """
     pfc = raw.get("personal_finance_category") or {}
     primary = (pfc.get("primary") or "").strip()
     if not primary:
         return UNCATEGORIZED
     return primary.replace("_", " ").title()
+
+
+def kind_of(raw: dict) -> TransactionKind:
+    """`personal_finance_category.primary` -> TransactionKind, never raising.
+
+    Reads the RAW constant, not `category_of`'s output -- see KINDS for why
+    that distinction is the whole point of this function existing separately.
+
+    Unknown and absent both become PURCHASE, deliberately without distinguishing
+    them. A row Plaid did not categorize and a row categorized into something we
+    have not mapped are the same thing to us: an ordinary charge until told
+    otherwise. TransactionKind.PURCHASE is also the model's default, so the two
+    halves of "we could not classify this" agree.
+    """
+    pfc = raw.get("personal_finance_category") or {}
+    primary = (pfc.get("primary") or "").strip().upper()
+    return KINDS.get(primary, TransactionKind.PURCHASE)
 
 
 def merchant_of(raw: dict) -> str:
@@ -435,6 +514,7 @@ def to_transaction(raw: dict, item_id: str) -> Transaction:
         category=category_of(raw),
         currency=currency,
         pending=bool(raw.get("pending", False)),
+        kind=kind_of(raw),
         # COPIED, not aliased. `raw=raw` would hand the model the caller's own
         # dict: RecordedPlaidSource passes rows straight out of a module-scoped
         # JSON payload, so a single `txn.raw[k] = v` anywhere downstream would

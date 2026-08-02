@@ -17,6 +17,10 @@ MANUFACTURED here, and each is a decision this file has to own:
                  the model forbids an empty one and grouping happens on it.
     category  -> UNCATEGORIZED. The bank did not say, and inventing one from the
                  descriptor is a guess dressed as a fact.
+    kind      -> PURCHASE, for every row without exception. See KIND below --
+                 this is the one manufactured field where the honest answer is
+                 "this source cannot know", and it is a real limitation rather
+                 than a placeholder waiting to be filled in.
     currency  -> the CURRENCY constant. A statement is denominated in one.
     account   -> supplied to the constructor. The file does not know which
                  account it is a statement OF; the person exporting it does.
@@ -43,6 +47,7 @@ from core.models import (
     Provider,
     SourceRef,
     Transaction,
+    TransactionKind,
     make_id,
 )
 from core.money import to_cents
@@ -101,6 +106,31 @@ DEFAULT_PATH = "fixtures/bank_export.csv"
 #: bucket beats guessing from the descriptor: "SHELL OIL" is a gas station most
 #: of the time and a lunch the rest of it.
 UNCATEGORIZED = "Uncategorized"
+
+#: Every row this adapter emits, and A KNOWN LIMITATION OF THE CSV SOURCE
+#: rather than a stub.
+#:
+#: TransactionKind.TRANSFER needs to know that money moved between two accounts
+#: the SAME PERSON owns. A three-column export carries a date, a descriptor and
+#: an amount: no category, no counterparty, and no knowledge of any account
+#: other than the one being exported. The fact simply is not in the file.
+#:
+#: The tempting fix is to pattern-match the descriptor -- "AMEX EPAYMENT",
+#: "ONLINE TRANSFER TO", "PAYMENT THANK YOU" -- and it is the wrong one, in both
+#: directions. A false positive silently REMOVES real spending from the totals
+#: (insights.spending_by_category skips TRANSFER), which is the worst failure a
+#: money dashboard has: a number that is too small and looks fine. A false
+#: negative leaves the 4.7 double-count in place, which at least matches what
+#: the row says. And "PAYMENT" appears in the descriptors of plenty of ordinary
+#: purchases. Guessing here would trade a visible, explicable overcount for an
+#: invisible undercount.
+#:
+#: So the CONSEQUENCE, stated rather than hidden: a CSV containing a card
+#: payment double-counts it in Spending by Category and can have it detected as
+#: a subscription -- exactly the three defects the fake fixture demonstrated
+#: through 4.7. The real fix is upstream, in a source that categorizes (Plaid
+#: does), or in a user-facing override once there is a database to store one.
+KIND = TransactionKind.PURCHASE
 
 #: Key csv.DictReader parks surplus fields under. It defaults to None, which is
 #: a value you cannot distinguish from "this key was absent" -- see
@@ -338,6 +368,11 @@ class CsvSource:
             # A CSV export is settled history. Pending charges are, by
             # definition, not on the statement you downloaded.
             pending=False,
+            # Set explicitly even though it equals the model's default. The
+            # default exists so an adapter that cannot classify does not break;
+            # writing it here says this adapter CONSIDERED the question and
+            # cannot answer it, which is a different statement. See KIND.
+            kind=KIND,
         )
 
 

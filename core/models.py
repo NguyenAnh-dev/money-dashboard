@@ -57,6 +57,37 @@ class AccountType(str, Enum):
     OTHER = "other"
 
 
+class TransactionKind(str, Enum):
+    """WHAT a transaction is, as opposed to what it was spent on.
+
+    Distinct from `category` on purpose, and the distinction is the whole point
+    of this enum. `category` is a DISPLAY STRING each source spells its own way:
+    the fixture writes "Transfer", Plaid writes "Transfer In"/"Transfer Out",
+    a CSV writes "Uncategorized". Keying behaviour off that string works on one
+    source and quietly fails on the other two -- so analysis reads THIS, which
+    every adapter sets deliberately, and never the text beside it.
+
+    TRANSFER is the member that currently earns its keep. Money moving between
+    two accounts the user owns is not spending: the purchases were already
+    counted when they were charged, so counting the card payment too reports
+    money that was never spent (see insights.spending_by_category), and a
+    payment that varies month to month satisfies every rule find_recurring has
+    while being nothing like a subscription.
+
+    The others are declared now rather than added one at a time because the set
+    is the taxonomy; an adapter author needs to see the whole thing to pick
+    correctly. INCOME/FEE/REFUND are carried by adapters that can classify them
+    and are not yet read by anything -- that is fine, they are non-null and
+    correct the day an insight wants them.
+    """
+    PURCHASE = "purchase"   # ordinary spending
+    TRANSFER = "transfer"   # money between your own accounts
+    INCOME = "income"       # money in: payroll, interest
+    FEE = "fee"             # the bank charging you
+    REFUND = "refund"       # money back from a merchant
+    OTHER = "other"
+
+
 #: Account kinds where a positive provider balance means "you owe this much".
 #: Plaid reports a credit card's balance as positive debt; our model says debt
 #: is negative, so these need a flip that a checking account does not. Get it
@@ -178,6 +209,17 @@ class Transaction:
     amount_cents: int           # POSITIVE = spent, NEGATIVE = received
     category: str               # "Food & Drink"
     currency: str = "USD"
+    kind: TransactionKind = TransactionKind.PURCHASE
+                                # WHAT it is, not what it bought. DEFAULTED, and
+                                # the default is the design: a source that
+                                # cannot classify (a CSV has no category data at
+                                # all) neither breaks nor has to invent a guess,
+                                # and every consumer still reads a non-null
+                                # value on every row. PURCHASE is the safe
+                                # default because it is the only one that
+                                # changes no behaviour -- defaulting to OTHER
+                                # would drop unclassified rows out of whatever
+                                # a later insight decides OTHER means.
     pending: bool = False       # not yet settled; amount and date may still
                                 # change, and Plaid swaps the id when it posts
     raw: dict = field(default_factory=dict, repr=False)

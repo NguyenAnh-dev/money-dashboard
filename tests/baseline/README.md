@@ -61,6 +61,50 @@ rendering at width 40, which does change it. A passing gate is therefore not
 evidence the width pin works — it will only start mattering once some output
 approaches the margin.
 
+## The same encoding trap, arriving by a second route: **reporting**
+
+Everything above pins the encoding on the way *in* — the render goes to a
+`StringIO`, so `rich` always emits Unicode boxes. None of it helps on the way
+*out*, when a failing gate echoes that render back to a real console.
+
+That was a live bug until 4.8, and it was in the worst possible place: the diff
+is full of `│` and `━`, Windows stdout is cp1252, so `print` raised
+`UnicodeEncodeError` on the first box character. The gate reported `RENDER FAIL`
+and then **died before showing a single line of what changed** — the check was
+right, only its report was unprintable. The workaround was
+`PYTHONIOENCODING=utf-8`, which meant knowing the trick before you could read
+your own failure.
+
+Pinned now, at the top of `check_baseline.py`:
+
+```python
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+```
+
+Three details, each load-bearing:
+
+- **`errors="replace"`** is the belt-and-braces half. utf-8 fixes every console
+  that can handle it; `replace` means one that genuinely cannot render a glyph
+  substitutes `?` instead of taking the gate down. A mangled character in a diff
+  is still readable — a traceback where the diff should be is not.
+- **`stderr` too**, and not for symmetry. Adapter errors interpolate row content
+  into their messages (`_clean_currency` reports the bad code, `'ÉUR'`;
+  `csv_source` names the offending cell), and tracebacks go to stderr. Without
+  it, a sync failing on a non-ASCII merchant dies on the error *about* the
+  failure, replacing a precise message with a `UnicodeEncodeError` pointing at
+  the print machinery.
+- **`hasattr`-guarded**, because `reconfigure` is a `TextIOWrapper` method:
+  present for a console and a pipe, absent when something has already swapped the
+  stream for its own object (pytest capture, some CI wrappers). Those handle
+  Unicode themselves, and crashing on the fix for a crash would be a poor trade.
+
+The diff is the only place the gate echoes rendered content — `--update` prints
+just a path and a line count, and the STRUCTURE failures interpolate ids and type
+names. But the fix is on the stream rather than at that one `print`, so a future
+failure message that names a merchant is covered without anyone remembering this.
+
 ## Two things that will silently rewrite this file
 
 **Trailing whitespace is significant.** `rich` centres table titles by padding
@@ -85,10 +129,16 @@ cosmetic, and it would put a predicted diff inside the diff-free range.
 Step 4.6 is the first deliberate break. Only run `--update` on a step that
 predicted its own diff in advance.
 
-## Known upcoming diffs
+## Predicted diffs, as they land
 
 - **4.6** — the pending Starbucks and monthly Amex payment rows, plus the header
-  text if you choose to make it dynamic then.
+  text if you choose to make it dynamic then. *(Done.)*
+- **4.8** — transfer handling. Predicted in advance and matched exactly: Amex
+  Payment leaves Recurring Charges (five rows back to four), the `Transfer` row
+  leaves Spending by Category (−$1634.49, Groceries back on top), several column
+  widths shrink as the widest values disappear, and the transaction count stays
+  at **76** — the payment row itself is still there, in the count and in Recent
+  Transactions, because the money did move. *(Done.)*
 
 ## If you add anything nondeterministic
 

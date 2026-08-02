@@ -36,6 +36,7 @@ from core.models import (
     Provider,
     SourceRef,
     Transaction,
+    TransactionKind,
     make_id,
 )
 
@@ -165,28 +166,32 @@ class FakeSource:
              price change this detector exists to report); every other view
              counts it, so it is in the spending total and the count.
 
-        THE AMEX PAYMENT IS A TRANSFER, AND IT IS WRONG ON PURPOSE:
+        THE AMEX PAYMENT IS A TRANSFER, AND 4.8 IS WHERE IT SAYS SO:
           Money leaves acc_1 (checking) on the 25th of all three months to pay
           the acc_2 card. The amounts VARY DELIBERATELY -- $512.80, $439.65,
-          $682.04 -- because you pay what you spent, and that variance is the
-          sharpest way to see the problem: the recurring table reports
-          "+$242.39" against it, i.e. a price-rise alert on a card payment.
-          A flat amount would hide that behind an empty Change column. Three
-          known defects follow, all of which stay until 4.8 introduces transfer
-          handling:
+          $682.04 -- because you pay what you spent, and that variance was the
+          sharpest way to see the problem it used to cause: a "+$242.39"
+          price-rise alert on a card payment. A flat amount would have hidden
+          that behind an empty Change column.
 
-            - It is DETECTED AS A FIFTH SUBSCRIPTION. Monthly, one charge per
-              month, gaps of 31 and 32 days -- it satisfies every rule the
-              detector has. Nothing in the model yet says "this is a move
-              between two accounts I own", so the detector cannot know.
-            - It DOUBLE-COUNTS SPENDING. The Amex purchases already counted
-              when they were charged; paying the card counts them again, so
-              the Transfer category is $1634.49 of money that was never spent
-              -- and it now outranks Groceries as the top spending category.
-            - Its PRICE-CHANGE ALERT IS MEANINGLESS. A subscription going up
-              $242.39 is worth a warning; a card payment going up $242.39 just
-              means you bought more last month. The delta is real arithmetic
-              on a comparison that should never have been made.
+          Through 4.7 the row carried three visible defects, all of them
+          downstream of ONE missing fact -- the model had no way to say "this is
+          a move between two accounts I own", so every rule the detector had was
+          satisfied honestly:
+
+            - detected as a FIFTH SUBSCRIPTION (monthly, one charge per month,
+              gaps of 31 and 32 days);
+            - $1634.49 of DOUBLE-COUNTED SPENDING, since the Amex purchases
+              already counted when they were charged -- enough to outrank
+              Groceries as the top category;
+            - a MEANINGLESS price-change alert on a card payment.
+
+          `kind=TransactionKind.TRANSFER` supplies that fact, and all three go
+          away at once: find_recurring and spending_by_category both skip
+          TRANSFER. THE ROW STAYS. It is still in the transaction count and
+          still in the recent list, because the payment did happen -- deleting
+          it would discard the demonstration rather than fix it, and it is the
+          only row proving the skip works end to end.
         """
         # Ids are derived from each row's CONTENT, not its position -- see
         # adapters/fingerprint.py for why txn_001.. is a trap. The practical
@@ -198,17 +203,19 @@ class FakeSource:
         rows: list[tuple] = []
 
         def add(when, name, merchant, amount_cents, category, account="acc_1",
-                pending=False):
+                pending=False, kind=TransactionKind.PURCHASE):
             # The RAW descriptor and the bare provider account id go into the
-            # hash; `merchant`, `category` and `pending` stay out of it
+            # hash; `merchant`, `category`, `pending` and `kind` stay out of it
             # deliberately. The first two are OUR derived values, and the day
             # the merchant cleaner improves is not the day every historical id
             # should move. `pending` is worse: it flips to False on settle, so
             # hashing it would rekey the row exactly when it posts -- turning
-            # the Step 5 upsert into a duplicate.
+            # the Step 5 upsert into a duplicate. `kind` is the same argument as
+            # `category`: it is a classification we assign, so reclassifying a
+            # row must not rekey it.
             provider_id = minter.mint(when.isoformat(), name, amount_cents, account)
             rows.append((provider_id, when, name, merchant, amount_cents,
-                         category, _ns(account), pending))
+                         category, _ns(account), pending, kind))
 
         # -----------------------------------------------------------------
         # RECURRING -- these are the signal your detector must find
@@ -234,15 +241,22 @@ class FakeSource:
             add(_posts_on(2026, month, 16), "T-MOBILE PCS SVC 800-937-8997",
                 "T-Mobile", tmobile_cents[month], "Bills & Utilities", "acc_1")
 
-            # A TRANSFER, not spending -- see the docstring. Anchored to the
-            # 25th, clear of the 4/12/16/20 anchors above so no two recurring
-            # rows share a billing day.
+            # A TRANSFER, and as of 4.8 it SAYS SO -- see the docstring. The
+            # `kind` is what analysis reads; the "Transfer" category string
+            # beside it is display text that Plaid and a CSV spell differently.
+            # Anchored to the 25th, clear of the 4/12/16/20 anchors above so no
+            # two recurring rows share a billing day.
             add(_posts_on(2026, month, 25), "AMEX EPAYMENT ACH PMT 1234",
-                "Amex Payment", amex_payment_cents[month], "Transfer", "acc_1")
+                "Amex Payment", amex_payment_cents[month], "Transfer", "acc_1",
+                kind=TransactionKind.TRANSFER)
 
             # --- income: monthly, but NOT a target of find_recurring (see docstring) ---
+            # INCOME is set for honesty, not for effect: find_recurring already
+            # skips this row on `amount_cents < 0`, and nothing reads the kind
+            # yet. It is the sign that carries the meaning today.
             add(date(2026, month, 1), "ACME CORP DIR DEP PPD ID:1234567890",
-                "Payroll Deposit", -230000, "Income", "acc_1")
+                "Payroll Deposit", -230000, "Income", "acc_1",
+                kind=TransactionKind.INCOME)
 
         # -----------------------------------------------------------------
         # MAY -- discretionary noise
@@ -333,7 +347,8 @@ class FakeSource:
                 category=category,
                 currency="USD",
                 pending=pending,
+                kind=kind,
             )
             for provider_id, when, name, merchant, amount_cents, category,
-            account_id, pending in rows
+            account_id, pending, kind in rows
         ]

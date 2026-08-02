@@ -48,6 +48,42 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# THE GATE MUST BE ABLE TO PRINT ITS OWN FAILURE. Before this line, a failing
+# RENDER check crashed instead of reporting: the diff echoes the rendered
+# dashboard, which is full of `rich` box-drawing characters, and Windows stdout
+# defaults to cp1252 -- so `print` raised UnicodeEncodeError on '│' and the
+# gate died mid-report, after saying "RENDER FAIL" and before showing a single
+# line of what changed. The check itself was correct; only the reporting was
+# unprintable, which is the worst possible place for this bug to live.
+#
+# Note this is the SAME cp1252 trap the module docstring describes, arriving by
+# a second route. The docstring's version is about the render (fixed by pinning
+# StringIO on the Console, so `rich` always emits Unicode); this one is about
+# echoing that render back out to a real console. Pinning the input encoding did
+# nothing for the output path.
+#
+# errors="replace" is the belt and braces. Reconfiguring to utf-8 fixes every
+# console that can actually handle it; `replace` means one that genuinely cannot
+# render a glyph substitutes a '?' rather than taking the whole gate down. A
+# mangled character in a diff is a cosmetic problem you can still read around; a
+# traceback where the diff should be is not.
+#
+# STDERR TOO, and it is not symmetry. Adapter errors interpolate row content
+# into their messages -- core.models._clean_currency reports the bad code
+# ('ÉUR'), csv_source names the offending cell -- and a traceback goes to
+# stderr. A sync that failed on a non-ASCII merchant would otherwise die on the
+# error ABOUT the failure, replacing a precise message with a UnicodeEncodeError
+# pointing at the print machinery.
+#
+# hasattr-guarded because `reconfigure` is a TextIOWrapper method: it is there
+# for a console and a pipe, and absent when something has already replaced the
+# stream with its own object (pytest's capture, some CI wrappers). Those
+# replacements handle Unicode themselves, so skipping is correct, and crashing
+# on the fix for a crash would be a poor trade.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # THIS IS A FAKE-DATA GATE BY DEFINITION, so say so before anything imports.
 # The baseline is a snapshot of the fixture; running with DATA_SOURCE=plaid in
 # the ambient shell would compare live bank data against it -- a guaranteed
