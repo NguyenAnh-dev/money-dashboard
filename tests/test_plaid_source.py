@@ -418,13 +418,6 @@ def test_ids_are_unique(accounts, transactions):
         assert len(set(ids)) == len(ids)
 
 
-def test_pending_transaction_id_is_carried_for_step_5(transactions):
-    """Plaid swaps transaction_id when a pending charge settles and reports the
-    old one here. Step 5 needs it to reconcile; carrying it now costs nothing
-    and saves a re-fetch later."""
-    assert all("pending_transaction_id" in t.raw for t in transactions)
-
-
 # ---------------------------------------------------------------------------
 # Currency
 # ---------------------------------------------------------------------------
@@ -444,6 +437,152 @@ def test_a_non_iso_currency_is_refused_rather_than_defaulted():
             "balances": {"current": 1.0, "iso_currency_code": None,
                          "unofficial_currency_code": "BTC"},
         }, ITEM_ID)
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+#
+# The one part of the I/O half worth testing without a network, because the
+# recorded Item cannot exercise it: 48 transactions against count=500 means
+# `has_more` is false on the first page and the loop body runs exactly once.
+# Every multi-page bug therefore survives both the fixture AND a live run
+# against sandbox.
+# ---------------------------------------------------------------------------
+
+class _FakeSdkTransaction:
+    """Stands in for a generated SDK model, which the adapter calls to_dict on."""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def to_dict(self) -> dict:
+        return self._payload
+
+
+class _PagingClient:
+    """A transactions_sync that hands back two pages, then stops.
+
+    Records the cursor it was given on each call, so the test can assert the
+    adapter threads it through rather than re-requesting page one forever --
+    which would loop until the process died.
+    """
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.cursors_seen: list[str | None] = []
+
+    def transactions_sync(self, request):
+        # The generated model only HAS a `cursor` attribute when one was
+        # passed, so absence is the signal for "first page" -- which is
+        # precisely what the adapter relies on.
+        self.cursors_seen.append(getattr(request, "cursor", None))
+
+        index = len(self.cursors_seen) - 1
+        return {
+            "added": [_FakeSdkTransaction(t) for t in self._pages[index]],
+            "next_cursor": f"cursor-{index + 1}",
+            "has_more": index + 1 < len(self._pages),
+        }
+
+
+def _plaid_txn(transaction_id: str, day: int) -> dict:
+    return {
+        "transaction_id": transaction_id,
+        "account_id": "acct_1",
+        "date": f"2026-07-{day:02d}",
+        "name": "COFFEE SHOP",
+        "merchant_name": "Coffee Shop",
+        "amount": 4.25,
+        "iso_currency_code": "USD",
+        "pending": False,
+        "personal_finance_category": {"primary": "FOOD_AND_DRINK"},
+    }
+
+
+def test_fetch_transactions_follows_the_cursor_across_pages():
+    """Concatenates pages and stops on has_more, not on a short page."""
+    from adapters.plaid_source import PlaidSource
+
+    pages = [
+        [_plaid_txn("t1", 1), _plaid_txn("t2", 2)],
+        [_plaid_txn("t3", 3)],                        # short page, NOT the end
+        [_plaid_txn("t4", 4)],
+    ]
+    client = _PagingClient(pages)
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+
+    transactions = source.fetch_transactions()
+
+    assert [t.source.provider_id for t in transactions] == ["t1", "t2", "t3", "t4"]
+    # First request carries no cursor; each subsequent one carries the previous
+    # response's next_cursor.
+    assert client.cursors_seen == [None, "cursor-1", "cursor-2"]
+
+
+def test_fetch_transactions_stops_after_one_page_when_has_more_is_false():
+    """The path the real sandbox Item actually takes."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient([[_plaid_txn("t1", 1)]])
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+
+    assert len(source.fetch_transactions()) == 1
+    assert client.cursors_seen == [None]
+
+
+def test_an_access_token_is_required():
+    from adapters.plaid_source import PlaidSource
+
+    with pytest.raises(ValueError, match="needs an access_token"):
+        PlaidSource(access_token="")
+
+
+# ---------------------------------------------------------------------------
+# raw
+# ---------------------------------------------------------------------------
+
+def test_raw_holds_the_whole_payload_not_a_hand_picked_key(payload,
+                                                            transactions):
+    """`Transaction.raw` is documented as "the provider's original payload".
+
+    Storing only pending_transaction_id under that name would read as the full
+    response to anyone trusting the model's docstring.
+    """
+    by_id = {t["transaction_id"]: t for t in payload["transactions"]}
+    for txn in transactions:
+        source_dict = by_id[txn.source.provider_id]
+        assert txn.raw == source_dict
+        # Equal but NOT the same object. Without this the assertion above is
+        # vacuous -- it would compare a dict to itself and pass on an adapter
+        # that aliased the caller's payload.
+        assert txn.raw is not source_dict
+
+    # And the key Step 5 needs is still reachable.
+    assert all("pending_transaction_id" in t.raw for t in transactions)
+
+
+def test_mutating_raw_cannot_corrupt_the_payload_it_came_from():
+    """The failure the copy prevents, stated as behaviour.
+
+    RecordedPlaidSource hands rows out of a module-scoped JSON payload, so an
+    aliased `raw` means one annotation downstream silently rewrites the fixture
+    for every later reader in the process -- including other tests.
+    """
+    source_dict = _plaid_txn("t1", 1)
+    txn = to_transaction(source_dict, ITEM_ID)
+
+    txn.raw["annotated_by_step_5"] = True
+    assert "annotated_by_step_5" not in source_dict
+
+
+def test_the_copy_is_shallow_and_that_is_documented_not_accidental():
+    """Nested values are still shared. Asserted so the limit is a known
+    property rather than a surprise the first time someone relies on it."""
+    source_dict = _plaid_txn("t1", 1)
+    txn = to_transaction(source_dict, ITEM_ID)
+
+    assert txn.raw["personal_finance_category"] is source_dict[
+        "personal_finance_category"]
 
 
 def test_the_account_type_table_only_maps_to_real_account_types():

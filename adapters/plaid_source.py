@@ -106,6 +106,25 @@ UNCATEGORIZED = "Uncategorized"
 #: `_currency_of`, which refuses to invent a code over a real non-ISO one.
 DEFAULT_CURRENCY = "USD"
 
+#: What goes in `Account.institution` for every Plaid account, and it is a
+#: PLACEHOLDER -- the accounts_get response does not carry the bank's name.
+#:
+#: The consequence is visible: a Plaid render reports "1 institutions" in the
+#: footer, and the net-worth panel's "across all banks" is aspirational.
+#:
+#: Getting the real name costs a second API call -- /institutions/get_by_id,
+#: keyed on `item.institution_id` from /item/get -- which buys one footer line
+#: in exchange for another network round trip and another failure mode. Not
+#: taken deliberately: this is COSMETICALLY wrong, not DISHONESTLY wrong, since
+#: nothing claims the name is real. (Contrast the header, which said "fake
+#: data" over live balances and was fixed at 4.7 for exactly that reason.)
+#:
+#: There is deliberately NO plumbing standing by for it. An unpopulated seam
+#: reads as a wired feature, and whoever implements this will pass the name to
+#: `to_account` as an explicit argument, which is clearer than a slot that has
+#: been quietly empty for months.
+INSTITUTION_NAME = "Plaid"
+
 
 # ---------------------------------------------------------------------------
 # Field coercion
@@ -205,8 +224,20 @@ def _to_date(value) -> date:
     raise TypeError(f"cannot read a date from {type(value).__name__}({value!r})")
 
 
-def _currency_of(record: dict) -> str:
-    """ISO-4217 code for one account or transaction.
+def _currency_of(fields: dict) -> str:
+    """ISO-4217 code, read from whichever dict actually carries it.
+
+    THE ARGUMENT IS NOT ALWAYS THE RECORD, and the two call sites differ:
+
+      * a transaction  -> the TOP-LEVEL dict; Plaid puts iso_currency_code
+                          beside `amount`.
+      * an account     -> its `balances` SUB-dict; Plaid puts the code next to
+                          the numbers it denominates, not on the account.
+
+    Hence `fields` rather than `record`: this takes "the dict that holds the
+    currency pair", and passing an account's outer dict would silently find
+    neither key and fall through to DEFAULT_CURRENCY. Naming it honestly is
+    the guard, since there is no way to tell the two shapes apart at runtime.
 
     `unofficial_currency_code` is checked and then REFUSED rather than ignored.
     It is how Plaid reports crypto and other non-ISO denominations, and quietly
@@ -214,11 +245,11 @@ def _currency_of(record: dict) -> str:
     total as dollars. `core.models` requires a real ISO code, so this fails at
     the record that has one instead of inventing a number nobody can trace.
     """
-    iso = record.get("iso_currency_code")
+    iso = fields.get("iso_currency_code")
     if iso:
         return iso
 
-    unofficial = record.get("unofficial_currency_code")
+    unofficial = fields.get("unofficial_currency_code")
     if unofficial:
         raise ValueError(
             f"account/transaction is denominated in {unofficial!r}, which is "
@@ -259,6 +290,16 @@ def category_of(raw: dict) -> str:
     spending-table row. The legacy `category` list is deliberately ignored --
     Plaid deprecated it, and it is a hierarchy in an array, which is a shape
     this app has nowhere to put.
+
+    A NOTE FOR 4.8, because this function looks like it already solves the
+    transfer problem and does not. Plaid does tag transfers -- TRANSFER_IN and
+    TRANSFER_OUT -- but they arrive here as the strings "Transfer In" and
+    "Transfer Out", while the fake fixture writes the literal "Transfer" and a
+    CSV writes "Uncategorized". Three sources, three spellings of one idea.
+    Keying transfer handling off the category STRING would therefore work on
+    the fixture and quietly fail on the other two, which is the argument for
+    `kind` being a real enum field each adapter sets deliberately rather than a
+    comparison against display text.
     """
     pfc = raw.get("personal_finance_category") or {}
     primary = (pfc.get("primary") or "").strip()
@@ -340,10 +381,8 @@ def to_account(raw: dict, item_id: str) -> Account:
         id=make_id(_ref(provider_id, item_id)),
         source=_ref(provider_id, item_id),
         name=raw.get("name") or provider_id,
-        # `official_name` is the marketing string ("Plaid Gold Standard 0%
-        # Interest Checking"); institution is filled by the caller, which is
-        # the only thing that knows which institution the Item points at.
-        institution=raw.get("_institution_name") or "Plaid",
+        # HARDCODED, and known to be wrong. See INSTITUTION_NAME.
+        institution=INSTITUTION_NAME,
         type=account_type,
         balance_cents=balance_cents,
         currency=currency,
@@ -371,8 +410,16 @@ def to_transaction(raw: dict, item_id: str) -> Transaction:
     scheme keeps the id and lets the upsert update the row; Plaid's scheme
     hands us two ids for one charge and expects the consumer to reconcile them.
     Neither is wrong, but code that assumes ours will duplicate every settling
-    Plaid charge. `pending_transaction_id` is carried in `raw` so the Step 5
-    reconciler has it without a re-fetch.
+    Plaid charge. The Step 5 reconciler needs `pending_transaction_id`, and it
+    reads it out of `raw` -- which holds the WHOLE payload, because that is
+    what `Transaction.raw` is documented to be ("the provider's original
+    payload"). Stashing a single hand-picked key under that name would read as
+    the full response to anyone who trusts the model's docstring.
+
+    The cost is memory: a few KB per row, excluded from `repr` so it never
+    lands in a log line by accident. The thing to know before Step 5 is that
+    this dict is NOT JSON-serializable as it stands -- the live SDK puts real
+    `date` objects in it -- so persisting it needs a serializer, not a dump.
     """
     currency = _currency_of(raw)
     provider_id = raw["transaction_id"]
@@ -388,7 +435,19 @@ def to_transaction(raw: dict, item_id: str) -> Transaction:
         category=category_of(raw),
         currency=currency,
         pending=bool(raw.get("pending", False)),
-        raw={"pending_transaction_id": raw.get("pending_transaction_id")},
+        # COPIED, not aliased. `raw=raw` would hand the model the caller's own
+        # dict: RecordedPlaidSource passes rows straight out of a module-scoped
+        # JSON payload, so a single `txn.raw[k] = v` anywhere downstream would
+        # rewrite the fixture for every later reader in the process.
+        #
+        # Shallow is the right depth. It stops the realistic failure -- adding
+        # or removing a top-level key -- at the cost of one dict per row.
+        # Nested values (`location`, `payment_meta`,
+        # `personal_finance_category`) are still shared, so this is a guard
+        # against accidental annotation, not an immutability guarantee. A deep
+        # copy would cost real memory per row to defend against a mutation
+        # nobody has a reason to make.
+        raw=dict(raw),
     )
 
 
@@ -415,14 +474,38 @@ class PlaidSource:
         self._access_token = access_token
         self._item_id = item_id
         self._client = client
-        self._institution_name: str | None = None
 
     @classmethod
     def from_env(cls) -> PlaidSource:
-        """Build from PLAID_* variables. Called by data_source.py."""
+        """Build from PLAID_* variables. Called by data_source.py.
+
+        PLAID_ITEM_ID IS REQUIRED HERE, though the constructor treats it as
+        optional, and the asymmetry is deliberate.
+
+        `_connection_id()` can resolve a missing Item id from /item/get and
+        caches it on the instance -- which is fine for a script or a test that
+        holds one adapter. It is useless on the render path, because
+        `data_source._get_source()` builds a FRESH adapter per call and
+        `main()` calls it twice (get_accounts, get_transactions). The cache
+        dies with each instance, so an unset PLAID_ITEM_ID costs two extra
+        network round trips on every single render, silently, forever.
+
+        Failing here converts that into a one-line config fix. The value is not
+        a secret and scripts/get_plaid_token.py prints it next to the token.
+        """
+        item_id = os.environ.get("PLAID_ITEM_ID", "").strip()
+        if not item_id:
+            raise ValueError(
+                "PLAID_ITEM_ID is not set. Add it to .env:\n"
+                "  PLAID_ITEM_ID=<the item_id printed by "
+                "scripts/get_plaid_token.py>\n"
+                "It is not a secret. Without it every render makes two extra "
+                "/item/get calls, because data_source builds a new adapter per "
+                "call and the resolved id cannot be cached across them."
+            )
         return cls(
             access_token=os.environ.get("PLAID_ACCESS_TOKEN", "").strip(),
-            item_id=os.environ.get("PLAID_ITEM_ID", "").strip() or None,
+            item_id=item_id,
         )
 
     # -- plumbing ---------------------------------------------------------
@@ -463,6 +546,14 @@ class PlaidSource:
         Resolved lazily rather than in __init__ so constructing a PlaidSource
         makes no network call -- which is what lets the conformance suite build
         one and then skip cleanly when credentials are absent.
+
+        THE CACHE ONLY HELPS A LONG-LIVED INSTANCE. `data_source._get_source()`
+        constructs a new adapter on every call by design (it re-reads
+        DATA_SOURCE per call so tests can change it), so on the render path
+        this resolves at most once per fetch and never carries over. That is
+        why `from_env()` refuses to build without PLAID_ITEM_ID; direct
+        construction keeps the lazy path for scripts and tests, which do hold
+        one instance.
         """
         if self._item_id:
             return self._item_id
@@ -483,14 +574,8 @@ class PlaidSource:
         response = self._api().accounts_get(
             AccountsGetRequest(access_token=self._access_token))
 
-        institution = self._institution_name
-        rows = []
-        for account in response["accounts"]:
-            raw = account.to_dict()
-            if institution:
-                raw["_institution_name"] = institution
-            rows.append(to_account(raw, item_id))
-        return rows
+        return [to_account(account.to_dict(), item_id)
+                for account in response["accounts"]]
 
     def fetch_transactions(self) -> list[Transaction]:
         """Every transaction, following the sync cursor to the end.
@@ -508,11 +593,19 @@ class PlaidSource:
         item_id = self._connection_id()
         added, cursor = [], None
         while True:
-            request = TransactionsSyncRequest(
-                access_token=self._access_token, count=500)
+            # Cursor passed to the CONSTRUCTOR, not assigned afterwards.
+            # Post-construction assignment does work on plaid-python 42 (these
+            # are generated OpenAPI models and `cursor` is in the schema), but
+            # the constructor is the documented form and does not depend on
+            # that. Worth stating because this branch is easy to leave
+            # unverified: the sandbox Item returns 48 transactions against a
+            # count of 500, so `has_more` is false on the first page and the
+            # second iteration never happens.
+            kwargs = {"access_token": self._access_token, "count": 500}
             if cursor is not None:
-                request.cursor = cursor
-            response = self._api().transactions_sync(request)
+                kwargs["cursor"] = cursor
+            response = self._api().transactions_sync(
+                TransactionsSyncRequest(**kwargs))
             added.extend(response["added"])
             cursor = response["next_cursor"]
             if not response["has_more"]:

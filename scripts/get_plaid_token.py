@@ -146,10 +146,12 @@ def _sync_all(client: plaid_api.PlaidApi, access_token: str) -> list:
     """
     added, cursor = [], None
     while True:
-        request = TransactionsSyncRequest(access_token=access_token, count=500)
+        # Constructor kwarg, not post-construction assignment -- see the same
+        # note in adapters/plaid_source.py.
+        kwargs = {"access_token": access_token, "count": 500}
         if cursor is not None:
-            request.cursor = cursor
-        response = client.transactions_sync(request)
+            kwargs["cursor"] = cursor
+        response = client.transactions_sync(TransactionsSyncRequest(**kwargs))
         added.extend(response["added"])
         cursor = response["next_cursor"]
         if not response["has_more"]:
@@ -284,9 +286,12 @@ def main() -> int:
         _record(client, access_token)
 
     print("\n" + "=" * 68)
-    print("Paste this into .env (it does not expire, so only once):\n")
+    print("Paste BOTH of these into .env (they do not expire, so only once):\n")
     print(f"PLAID_ACCESS_TOKEN={access_token}")
-    print(f"\n  item_id: {item_id}   (not a secret; useful in support tickets)")
+    # Required, not optional. PlaidSource.from_env() refuses to build without
+    # it, because data_source constructs a fresh adapter per call and would
+    # otherwise re-resolve the Item id over the network on every fetch.
+    print(f"PLAID_ITEM_ID={item_id}")
     print("=" * 68)
     return 0
 
