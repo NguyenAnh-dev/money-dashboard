@@ -157,26 +157,46 @@ def _sync_all(client: plaid_api.PlaidApi, access_token: str) -> list:
 
 
 def _sync_when_ready(client: plaid_api.PlaidApi, access_token: str) -> list:
-    """Retry past PRODUCT_NOT_READY, which is expected, not exceptional.
+    """Retry past a not-yet-ready Item. Two shapes, and BOTH must be handled.
 
-    Sandbox builds an Item's transaction history in the background. Treating
-    the first failure as fatal is the single most common reason this script
-    "does not work" on a freshly created Item.
+    Sandbox builds transaction history in the background, and it signals
+    "not ready" in two different ways:
+
+      1. PRODUCT_NOT_READY, raised as an ApiException. The obvious one.
+      2. HTTP 200 with `added: []` and `has_more: false`. NOT an error -- a
+         perfectly successful sync of an Item that has no transactions yet.
+
+    The first version of this function handled only (1), and (2) is what
+    actually happens most of the time. The result was a recorded fixture
+    containing 12 accounts and ZERO transactions, written without a single
+    warning, because an empty page is indistinguishable from a finished one
+    unless you know the Item is supposed to have data.
+
+    So an empty result is treated as not-ready and retried. The tradeoff is
+    explicit: an Item that genuinely has no transactions will burn the full
+    retry budget and then fail. That is the right trade for a sandbox
+    RECORDING script, whose entire output is worthless when empty.
     """
     for attempt in range(1, READY_ATTEMPTS + 1):
         try:
-            return _sync_all(client, access_token)
+            added = _sync_all(client, access_token)
+            if added:
+                return added
+            reason = "sync returned 0 transactions"
         except plaid.ApiException as exc:
             if "PRODUCT_NOT_READY" not in str(exc.body):
                 raise
-            print(f"  transactions not ready yet "
-                  f"(attempt {attempt}/{READY_ATTEMPTS}), waiting...")
-            time.sleep(READY_SLEEP_SECONDS)
+            reason = "PRODUCT_NOT_READY"
+
+        print(f"  {reason} (attempt {attempt}/{READY_ATTEMPTS}), waiting...")
+        time.sleep(READY_SLEEP_SECONDS)
 
     sys.exit(
-        "error: transactions were still not ready after "
-        f"{READY_ATTEMPTS * READY_SLEEP_SECONDS}s. The access_token above is "
-        "still valid -- re-run with --record to retry just the recording."
+        "error: no transactions after "
+        f"{READY_ATTEMPTS * READY_SLEEP_SECONDS}s. The access_token is still "
+        "valid -- re-run with --record-only to retry just the recording. "
+        "Nothing was written; a zero-transaction fixture is worse than none, "
+        "because it makes the adapter's transaction mapping look tested."
     )
 
 
@@ -232,9 +252,31 @@ def main() -> int:
         help="also save the raw sandbox payloads to fixtures/plaid_sandbox.json, "
              "for credential-free conformance tests",
     )
+    parser.add_argument(
+        "--record-only",
+        action="store_true",
+        help="record the fixture using the PLAID_ACCESS_TOKEN already in .env, "
+             "without minting a new Item",
+    )
     args = parser.parse_args()
 
     client = _client()
+
+    if args.record_only:
+        # Minting again would hand back a token for a DIFFERENT Item, so the
+        # fixture would describe accounts that the token in .env does not
+        # reach. Recording against the existing token is the only way to keep
+        # the two in agreement -- and re-recording is the common case, because
+        # the first attempt usually races the sandbox's history generation.
+        access_token = os.environ.get("PLAID_ACCESS_TOKEN", "").strip()
+        if not access_token:
+            sys.exit(
+                "error: --record-only needs PLAID_ACCESS_TOKEN in .env.\n"
+                "  Run without the flag to mint one first."
+            )
+        _record(client, access_token)
+        return 0
+
     print(f"creating a sandbox Item at {INSTITUTION_ID}...")
     access_token, item_id = _mint_access_token(client)
 
