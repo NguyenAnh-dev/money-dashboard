@@ -173,7 +173,10 @@ def test_the_normalizer_groups_where_a_raw_descriptor_would_not():
 def test_merchant_is_never_empty():
     """A model invariant, and one Transaction does not itself enforce. An
     empty merchant makes a group keyed on "" that swallows every such row."""
-    with pytest.raises(ValueError, match="blank Description"):
+    # "descriptor", not "Description": the normalizer moved to
+    # adapters/merchant.py at 4.7 and stopped naming a CSV column, because a
+    # Plaid `name` arrives at the same function.
+    with pytest.raises(ValueError, match="blank descriptor"):
         _normalize_merchant("   ")
 
 

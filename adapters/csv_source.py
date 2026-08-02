@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from adapters.fingerprint import ContentIdMinter
+from adapters.merchant import MERCHANT_PREFIXES, normalize_merchant  # noqa: F401
 from core.models import (
     Account,
     AccountType,
@@ -165,68 +166,14 @@ def clean_amount(text: str) -> int:
 # ---------------------------------------------------------------------------
 # Step 4: the merchant normalizer
 #
-# Deliberately dumb. It is a lookup table plus a two-word fallback, and that is
-# the whole design: a clever normalizer (regex stripping of store numbers, city
-# names, phone numbers) is a rabbit hole that produces confidently wrong names
-# and, worse, one that CHANGES -- and merchant is a grouping key. Improving it
-# must never move a historical id, which is why fingerprint.mint() is fed the
-# raw descriptor and never this function's output.
+# MOVED to adapters/merchant.py at 4.7, unchanged in behaviour. Plaid needs the
+# same fallback -- its `merchant_name` is null on about half of real rows -- and
+# two adapters sharing a function is the moment it stops belonging to either of
+# them. Re-exported under the old private name so callers and tests that import
+# `_normalize_merchant` from here keep working.
 # ---------------------------------------------------------------------------
 
-#: Descriptor prefix -> merchant name. Matched case-insensitively against the
-#: START of the raw descriptor, longest prefix first, so a more specific entry
-#: can override a shorter one.
-#:
-#: Prefixes, not exact matches, because the tail of a descriptor is where banks
-#: put the noise: a store number, a city, a phone number, an order code. The
-#: head is the stable part.
-MERCHANT_PREFIXES = {
-    "HULU": "Hulu",
-    "SAFEWAY": "Safeway",
-    "SHELL OIL": "Shell",
-    "COSTCO WHSE": "Costco",
-    "DOORDASH*": "DoorDash",
-    "HOME DEPOT": "Home Depot",
-    "REI ": "REI",
-    "ACME CORP PAYROLL": "Payroll Deposit",
-}
-
-
-def _normalize_merchant(description: str) -> str:
-    """Raw descriptor -> a merchant name that is never empty.
-
-        "HULU 877-8244858 CA"      -> "Hulu"      (prefix table)
-        "PANERA BREAD #601234"     -> "Panera Bread"  (fallback)
-        "TARGET"                   -> "Target"        (fallback, one word)
-
-    The fallback is FIRST TWO WORDS, TITLE-CASED, and it is chosen because it
-    is predictable rather than because it is good. Two words captures
-    "Home Depot" and "Panera Bread" while dropping the store number that would
-    split one merchant into eight groups. It gets "Rei #011" wrong, which is
-    why REI is in the table -- the table is where accuracy lives, and the
-    fallback only has to be non-empty and stable.
-
-    `.title()` is not applied blindly to the table entries: "REI" would become
-    "Rei". Table values are used verbatim.
-    """
-    text = description.strip()
-    if not text:
-        # An empty merchant violates a model invariant, and Transaction would
-        # not catch it (only currency and amount are guarded). Fail at the row
-        # that caused it rather than three layers up in a group keyed on "".
-        raise ValueError(
-            "blank Description: cannot derive a merchant, and the model "
-            "forbids an empty one because grouping happens on it"
-        )
-
-    upper = text.upper()
-    # Longest first: "SHELL OIL" must win over a hypothetical "SHELL".
-    for prefix in sorted(MERCHANT_PREFIXES, key=len, reverse=True):
-        if upper.startswith(prefix.upper()):
-            return MERCHANT_PREFIXES[prefix]
-
-    return " ".join(text.split()[:2]).title()
-
+_normalize_merchant = normalize_merchant
 
 # ---------------------------------------------------------------------------
 # Identity: account + provenance

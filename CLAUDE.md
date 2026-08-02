@@ -107,6 +107,19 @@ adapters/*  →  core/models  →  insights.py  →  main.py
   (everything is `Uncategorized`), no balance (`CsvAccount.balance_cents` defaults to 0 —
   summing the rows would give the period's net change while looking exactly like a
   balance), and no account identity, which is why that is constructor-supplied.
+  `plaid_source.py` is **split in two on purpose**: `to_account` / `to_transaction` are
+  module-level functions over plain dicts (no network, no SDK, no credentials), and
+  `PlaidSource` is the I/O around them. Every invariant the contract checks is a property
+  of the translation, so that split is what lets `fixtures/plaid_sandbox.json` enforce the
+  whole contract on every run. Its traps, all found in the recorded payload rather than the
+  docs: amounts arrive as **floats** (`_to_cents` goes via `str()`, never `int(x*100)`);
+  `merchant_name` is **null on half the rows**, so the raw name falls through
+  `adapters/merchant.py`; and a 401k balance carries **four decimal places**, which is why
+  `_balance_to_cents` rounds while `_to_cents` refuses to — a balance is a snapshot that
+  already moved, a transaction amount is what somebody was charged.
+- **`adapters/merchant.py`** — the shared descriptor → merchant normalizer, moved out of
+  `csv_source.py` at 4.7 when Plaid needed the same fallback. Adapters must not import each
+  other, and its error message no longer names a CSV column.
 - **`insights.py`** — pure analysis over model types. `find_recurring` is charges-only by
   design (skips `amount_cents < 0`, so payroll is excluded) and requires ≥3 distinct
   (year, month) pairs, exactly one charge per month, and every gap within 26–35 days.
@@ -123,9 +136,9 @@ adapters/*  →  core/models  →  insights.py  →  main.py
 
 ### Adding a provider
 
-`tests/test_conformance.py` is what "adding a provider" now means. It holds
-`ALL_SOURCES = [FakeSource(), CsvSource()]` and parametrizes the entire contract over it,
-so a new adapter inherits the full suite by adding **one entry** to that list — ids
+`tests/test_conformance.py` is what "adding a provider" now means. It holds `ALL_SOURCES`
+and parametrizes the entire contract over it, so a new adapter inherits the full suite by
+adding **one entry** to that list — ids
 namespaced, unique and reconstructible from their own `SourceRef`; every
 `Transaction.account_id` resolving; amounts `int`; merchants non-empty; debt non-positive;
 currency a real ISO code; dates `date` and not `datetime`; and two fetches producing
@@ -140,9 +153,30 @@ Two of those assertions are worth knowing about before writing an adapter:
 - **`test_ids_are_exactly_what_make_id_produces`** rebuilds each id from the record's own
   `SourceRef` rather than picking the string apart. That is stricter than a prefix check:
   it catches an adapter minting a plausible-looking id under the wrong connection.
-- **`test_the_source_list_covers_every_provider_that_has_an_adapter`** asserts the only
-  `Provider` missing from `ALL_SOURCES` is `PLAID`. When that adapter lands, this test is
-  what tells you to register it instead of letting it sit silently unconformed.
+- **`test_the_source_list_covers_every_provider_that_has_an_adapter`** asserts that *no*
+  `Provider` is missing from `ALL_SOURCES`. It named `PLAID` as the one exemption until 4.7;
+  that exemption is spent, so a new enum member now fails here until it is registered.
+
+**Plaid broke the "one entry" promise, and the reason is worth knowing.** `FakeSource` and
+`CsvSource` are pure — same input, same output, no setup. `PlaidSource` needs credentials,
+a network and a token from a multi-step handshake, so it cannot simply be constructed in a
+list. It participates as **two** entries instead:
+
+- `RecordedPlaidSource` drives the real `to_account` / `to_transaction` from
+  `fixtures/plaid_sandbox.json`. No credentials, no network, runs everywhere. **This is the
+  one that enforces the contract**, because every assertion is about the translation rather
+  than the connection.
+- The live `PlaidSource` runs in a separate test that **skips when credentials are absent**,
+  catching only what a recording cannot: the I/O half drifting from the translation half.
+  Note pytest deliberately does **not** load `.env`, so this skips even when `.env` is
+  populated — otherwise every test run would hit the network.
+
+A skipped test reads as green, which is why Plaid does not participate by skipping alone.
+
+**Re-recording the fixture** (`scripts/get_plaid_token.py --record-only`) churns the whole
+file: sandbox regenerates data per Item with dates relative to the recording date. Record
+against the token already in `.env` — minting again returns a token for a *different* Item,
+and the fixture would then describe accounts that token cannot reach.
 
 The module pins **both** `DATA_SOURCE` and `CSV_PATH` before importing adapters. It builds
 sources directly rather than through `data_source`, so the env var has no say — but a test
@@ -186,10 +220,15 @@ code path.
 
 ## Project conventions
 
-- This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 are
-  **diff-free refactors** — they move code and must leave the render byte-identical. The
-  hardcoded `v0.1 - fake data` header in `main.py` must not be touched before 4.6 for
-  exactly this reason. Step 5 introduces SQLite, which is why id stability matters now.
+- This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 were
+  **diff-free refactors** — they moved code and had to leave the render byte-identical.
+  Step 5 introduces SQLite, which is why id stability matters now.
+- **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`),
+  via `data_source.active_source_name()`. It was hardcoded through 4.5 so those refactors
+  stayed diff-free; the pin expired at 4.7, when a Plaid render put real balances on screen
+  under the word "fake". That is the failure `_get_source`'s error message argues against,
+  pointed the other way — claiming one thing while showing another. Note the fake render is
+  **byte-identical** either way, which is why fixing this moved no baseline.
 - Comments here explain *why*, often at length, and frequently name the specific bug a
   line prevents. Match that register when editing; don't strip it as verbose.
 - The fixture in `adapters/fake.py` has traps baked in on purpose (Chipotle at a constant
@@ -220,6 +259,12 @@ code path.
   alongside the stale pending one. Plaid sidesteps this by supplying its own id and
   swapping it on settle; a CSV cannot. Decide the strategy when the database exists, not
   by pre-emptively weakening the hash.
+- **`Account.institution` is hardcoded to `"Plaid"`** for every Plaid account, so a Plaid
+  render reports "3 institutions" as 1 and the net-worth panel's "across all banks" is
+  aspirational. The real name needs a second API call (`/institutions/get_by_id` off
+  `item.institution_id`), which buys a footer line in exchange for another network round
+  trip and another failure mode. Deliberately not taken: it is *cosmetically* wrong, not
+  *dishonestly* wrong — nothing claims the name is real, unlike the header did.
 - **The `pending` skip in `find_recurring` is currently unenforced.** The fixture's only
   pending row is a Starbucks, which `find_recurring` already rejects for having 15 charges
   across 3 months — so deleting `if txn.pending: continue` changes no output and no test

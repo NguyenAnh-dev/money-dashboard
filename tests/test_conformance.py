@@ -55,8 +55,13 @@ ROOT = Path(__file__).resolve().parent.parent
 os.environ["DATA_SOURCE"] = "fake"
 os.environ["CSV_PATH"] = str(ROOT / "fixtures" / "bank_export.csv")
 
+import json                                        # noqa: E402
 from adapters.csv_source import CsvSource          # noqa: E402  (after the pins)
 from adapters.fake import FakeSource               # noqa: E402
+from adapters.plaid_source import (                # noqa: E402
+    to_account,
+    to_transaction,
+)
 from core.models import (                          # noqa: E402
     DEBT_TYPES,
     AccountType,
@@ -74,9 +79,59 @@ from core.models import (                          # noqa: E402
 #: source arrives already covered by the full contract.
 #:
 #: Instances, not classes, because constructor shapes differ: FakeSource takes
-#: nothing, CsvSource takes a path and an account, and Plaid's will take an
-#: access token. The list is the one place that knows how to build each one.
+#: nothing, CsvSource takes a path and an account, PlaidSource an access token.
+#: The list is the one place that knows how to build each one.
+#:
+#: PLAID BROKE THE "ADD ONE ENTRY" PROMISE, and it is worth saying why rather
+#: than quietly working around it. FakeSource and CsvSource are pure: same
+#: input, same output, no setup. PlaidSource needs credentials, a network, and
+#: a token from a multi-step handshake, so it cannot simply be constructed here
+#: and run. It participates as TWO entries instead:
+#:
+#:   * RecordedPlaidSource -- the adapter's translation driven by a committed
+#:     sandbox payload. No credentials, no network, runs everywhere, every
+#:     time. This is the one that actually enforces the contract, because every
+#:     assertion below is a property of the TRANSLATION rather than of the
+#:     connection.
+#:   * The live PlaidSource -- appended only when credentials are present, and
+#:     skipped loudly otherwise (see `_live_plaid_source`). It checks the one
+#:     thing the recording cannot: that the I/O half still returns what the
+#:     translation half expects.
+#:
+#: A skipped test reads as green, so a Plaid adapter that participated ONLY by
+#: skipping would be unconformed in practice while the suite said nothing.
+
+
+class RecordedPlaidSource:
+    """The Plaid adapter's translation, driven by fixtures/plaid_sandbox.json.
+
+    Deliberately NOT a subclass or a mock of PlaidSource. It reuses the real
+    `to_account` / `to_transaction` -- the entire mapping under test -- and
+    replaces only the network. Mocking the SDK instead would test our mock.
+    """
+
+    #: Any non-empty string. The payload does not record an item_id, and every
+    #: id assertion rebuilds ids from each record's own SourceRef anyway.
+    ITEM_ID = "recorded_sandbox_item"
+
+    def __init__(self, path: Path) -> None:
+        self._payload = json.loads(path.read_text(encoding="utf-8"))
+
+    def fetch_accounts(self):
+        return [to_account(raw, self.ITEM_ID)
+                for raw in self._payload["accounts"]]
+
+    def fetch_transactions(self):
+        return [to_transaction(raw, self.ITEM_ID)
+                for raw in self._payload["transactions"]]
+
+
+PLAID_FIXTURE = ROOT / "fixtures" / "plaid_sandbox.json"
+
 ALL_SOURCES = [FakeSource(), CsvSource()]
+
+if PLAID_FIXTURE.exists():
+    ALL_SOURCES.append(RecordedPlaidSource(PLAID_FIXTURE))
 
 #: ISO-4217: exactly three upper-case letters. Anything else splits a currency
 #: group in two or renders as a mangled symbol.
@@ -345,12 +400,27 @@ def test_the_source_list_covers_every_provider_that_has_an_adapter():
 
     tested = {next(iter({t.source.provider for t in s.fetch_transactions()}))
               for s in ALL_SOURCES}
-    assert tested == {Provider.FAKE, Provider.CSV}
 
     not_yet = set(Provider) - tested
-    assert not_yet == {Provider.PLAID}, (
-        f"Provider has changed: {not_yet} has no adapter in ALL_SOURCES. Add "
-        f"it, or update this assertion to say why it is exempt."
+    assert not not_yet, (
+        f"{not_yet} has no adapter in ALL_SOURCES. Add it, or update this "
+        f"assertion to say why it is exempt."
+    )
+
+
+def test_the_plaid_fixture_is_present_so_plaid_is_actually_covered():
+    """Separate from the registry check above, and deliberately so.
+
+    ALL_SOURCES only picks up RecordedPlaidSource when the fixture exists, so
+    a missing fixture would silently drop Plaid from the entire contract and
+    the registry test would then fail with a confusing message about the enum.
+    This states the real precondition: the recording is what makes Plaid
+    conformed, and losing it is a specific, fixable problem.
+    """
+    assert PLAID_FIXTURE.exists(), (
+        f"{PLAID_FIXTURE.name} is missing, so the Plaid adapter is running "
+        f"unconformed. Re-record it: "
+        f"./venv/Scripts/python.exe scripts/get_plaid_token.py --record-only"
     )
 
 
@@ -397,6 +467,68 @@ def test_escape_segment_rejects_empty(segment):
 def test_make_id_rejects_a_blank_connection_id():
     with pytest.raises(ValueError, match="must not be empty"):
         make_id(SourceRef(Provider.CSV, provider_id="row_1", connection_id=""))
+
+
+# ---------------------------------------------------------------------------
+# The LIVE Plaid source
+#
+# Everything above runs on a recording. This is the only thing here that talks
+# to Plaid, and it exists to catch the one class of failure a recording cannot:
+# the I/O half drifting away from the translation half -- a renamed response
+# field, an SDK upgrade that changes what to_dict() emits, an expired grant.
+#
+# Skipped when credentials are absent, which is most of the time. That is
+# acceptable ONLY because the recorded source above already enforces the
+# contract on every run; a skip here loses the freshness check, not the
+# contract.
+# ---------------------------------------------------------------------------
+
+def _plaid_credentials_present() -> bool:
+    return all(os.environ.get(name, "").strip() for name in
+               ("PLAID_CLIENT_ID", "PLAID_SECRET", "PLAID_ACCESS_TOKEN"))
+
+
+requires_plaid_credentials = pytest.mark.skipif(
+    not _plaid_credentials_present(),
+    reason="PLAID_CLIENT_ID / PLAID_SECRET / PLAID_ACCESS_TOKEN not set; "
+           "the recorded fixture covers the contract, this covers freshness",
+)
+
+
+@requires_plaid_credentials
+def test_the_live_plaid_source_still_honours_the_contract():
+    """A compact re-run of the invariants, against the real API.
+
+    Not parameterized into ALL_SOURCES, because that list is built at import
+    and a network call per test would turn a 0.2s suite into a slow, flaky one
+    for whoever does have credentials exported.
+    """
+    from adapters.plaid_source import PlaidSource
+
+    source = PlaidSource.from_env()
+    accounts = source.fetch_accounts()
+    transactions = source.fetch_transactions()
+
+    assert accounts and transactions
+
+    known = {a.id for a in accounts}
+    assert not {t.account_id for t in transactions if t.account_id not in known}
+
+    for record in [*accounts, *transactions]:
+        assert record.id == make_id(record.source)
+        assert record.source.provider is Provider.PLAID
+        assert type(getattr(record, "balance_cents",
+                            getattr(record, "amount_cents", 0))) is int
+
+    for txn in transactions:
+        assert txn.merchant and txn.merchant.strip()
+        # `type(...) is date`, not isinstance: datetime subclasses date, so an
+        # isinstance check cannot see one slipping through.
+        assert type(txn.date) is date
+
+    for account in accounts:
+        if account.type in DEBT_TYPES:
+            assert account.balance_cents <= 0
 
 
 @pytest.mark.parametrize("currency", ["US", "USDD", "", "U$D", "12", "1 2", "ÉUR"])

@@ -2,7 +2,12 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from data_source import get_accounts, get_transactions, dollars
+from data_source import (
+    active_source_name,
+    dollars,
+    get_accounts,
+    get_transactions,
+)
 from insights import total_balance, spending_by_category, find_recurring
 
 # NOTE: there is deliberately no module-level `console`. The rendering target is
@@ -99,10 +104,17 @@ def main(console=None):
     transactions = get_transactions()
 
     console.print()
-    # NOTE: "v0.1 - fake data" is hardcoded on purpose until 4.6. Making it
-    # reflect the active source is a one-line cosmetic change that WOULD move
-    # the baseline, and steps 4.1-4.5 are supposed to be diff-free.
-    console.print("[bold]  MONEY DASHBOARD[/bold]  [dim]v0.1 - fake data[/dim]")
+    # The label reports the ACTIVE source. It was hardcoded to "fake data"
+    # through 4.1-4.5, which were diff-free refactors -- changing it would have
+    # moved the baseline for a cosmetic reason. That pin expired the moment a
+    # Plaid render put real balances on screen underneath the word "fake",
+    # which is a dashboard claiming one thing while showing another.
+    #
+    # Note this leaves the fake render BYTE-IDENTICAL: active_source_name()
+    # returns "fake" there, so the string is unchanged and the baseline does
+    # not move. Only csv and plaid renders differ.
+    console.print(f"[bold]  MONEY DASHBOARD[/bold]  "
+                  f"[dim]v0.1 - {active_source_name()} data[/dim]")
     console.print()
 
     show_accounts(accounts, console)
