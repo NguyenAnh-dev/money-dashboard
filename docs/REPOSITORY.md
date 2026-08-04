@@ -376,6 +376,250 @@ one.
 
 ---
 
+---
+
+# Step 5.5: the read path
+
+The mirror of 5.4 — rows back into `Account` and `Transaction` objects. Four
+conversions do not reverse cleanly, and they are the whole content of this half.
+
+## The order I built it in
+
+1. **The two scalar converters** (`_to_date`, `_to_datetime`), because everything
+   else depends on them and they are the thing `detect_types` was rejected in
+   favour of.
+2. **`_source_ref`**, reassembling the four flattened columns into one object.
+3. **`account_from_row` / `transaction_from_row`**, one field at a time against
+   the model definition.
+4. **`load_accounts` / `load_transactions`**, which are just the query and the
+   ordering.
+5. **The round trip test**, last — because it is the only test that would catch a
+   conversion nobody thought to name, and it is worthless if written against the
+   code rather than against the model.
+
+Before writing any of it I checked one thing, described under *Ordering* below,
+because it could have moved the baseline.
+
+---
+
+## `decode_raw`
+
+```python
+def decode_raw(text: str) -> dict:
+    return json.loads(text)
+```
+
+A one-line wrapper that looks like nothing. It exists to be the named partner of
+`encode_raw`: the two are a pair, and a bare `json.loads` at the call site would
+hide the fact that only one half of that pair has custom behaviour. If a future
+change needs the decode side to do anything — a schema tweak, a compatibility
+shim for an older payload shape — this is where it goes, and no call site
+changes.
+
+## `_to_date` and `_to_datetime`
+
+```python
+def _to_date(value: str) -> date:
+    return date.fromisoformat(value)
+
+def _to_datetime(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+```
+
+**This is the explicit conversion chosen over `detect_types` at 5.3.** Converters
+registered with `sqlite3` are per-connection and keyed on declared-type strings,
+so they would work inside the app and silently do nothing in a `sqlite3` shell or
+a DB browser — the same file behaving differently depending on who opened it.
+These two functions work the same for everyone because they are not magic.
+
+**`date.fromisoformat`, not `strptime`.** It is the exact inverse of the
+`.isoformat()` used on the way in, so the two cannot drift. `strptime` with a
+format string would be a second place to keep the format correct — and
+`csv_source.DATE_FORMAT` is already the project's demonstration that a format
+string is a thing you can get wrong in a way nothing catches.
+
+**`_to_date` is not nullable and `_to_datetime` is.** That asymmetry is the
+schema: `transactions.date` is `NOT NULL`, `fetched_at` is not. Making both
+nullable would be tidier and would silently accept a NULL date, which is a
+corrupt row the model would then have to reject three layers later.
+
+**Why `fetched_at` needs the guard at all.** It is `None` on every file-based
+source — the fixture and the CSV both leave it unset, since a file on disk was
+not fetched at a moment. So the null path is the *common* one here, not the edge
+case.
+
+## `_source_ref`
+
+```python
+def _source_ref(row: sqlite3.Row) -> SourceRef:
+    return SourceRef(
+        provider=Provider(row["provider"]),
+        provider_id=row["provider_id"],
+        connection_id=row["connection_id"],
+        fetched_at=_to_datetime(row["fetched_at"]),
+    )
+```
+
+Undoes the flattening from 5.2. Both row builders call it, which is what stops
+the two from drifting apart — the failure that would produce is an `Account`
+whose provenance reassembles correctly and a `Transaction` whose does not.
+
+**`Provider(row["provider"])` is a lookup by value, and it validates.** A string
+in that column that is not a real `Provider` raises `ValueError` right here, at
+the row it came from. The schema's `CHECK (provider IN (...))` already prevents
+it on the way in — this catches the case the CHECK cannot, which is a database
+written by something else.
+
+**Note what is *not* reconstructed: the id.** It comes straight from `row["id"]`,
+never from `make_id(_source_ref(row))`. Rebuilding it would look more principled
+and would be wrong: the id is what is *stored*, and if the two ever disagreed,
+recomputing would silently paper over a real inconsistency instead of surfacing
+it. `test_ids_are_exactly_what_make_id_produces` in the conformance suite is
+where that agreement gets checked, on the write side where it belongs.
+
+## `account_from_row`
+
+```python
+def account_from_row(row: sqlite3.Row) -> Account:
+    return Account(
+        id=row["id"],
+        source=_source_ref(row),
+        ...
+        type=AccountType(row["type"]),
+        ...
+        as_of=None if row["as_of"] is None else _to_date(row["as_of"]),
+    )
+```
+
+**Constructing a real `Account`, which means `__post_init__` runs.** Every
+invariant the model guards — integer cents, a valid ISO currency — is therefore
+re-checked on the way *out* of the database, not just on the way in. That is free
+and it is the right place for it: a corrupted row fails on load, at the row, not
+three layers up inside a total that merely looks surprising.
+
+**`AccountType(row["type"])` rather than a dict lookup.** The `str` mixin makes
+the enum constructor accept its own value directly, so there is no mapping table
+to maintain and no chance of one going stale when a member is added.
+
+**The inline conditional on `as_of` instead of a `_to_date_or_none` helper.** One
+nullable date, one call site. A third helper whose only difference from
+`_to_datetime` is the type it returns would be more code than the conditional it
+replaces.
+
+## `transaction_from_row`
+
+Same shape. Two lines carry the interesting decisions:
+
+```python
+pending=bool(row["pending"]),
+```
+
+**Stored as 0/1, and the model does not guard this field.** Without the cast, an
+`int` flows all the way through into every consumer. And `1 == True` in Python,
+so almost everything keeps working — which is precisely what makes it dangerous.
+What breaks is anything doing `is True`, anything type-checking, and anything
+serializing the object back out, where `"pending": 1` appears where `true` was
+expected. `test_pending_comes_back_as_a_real_bool` asserts with `is`, because
+`==` would pass on the bug.
+
+```python
+raw=decode_raw(row["raw"]),
+```
+
+Known not to equal what went in for Plaid rows — a `date` went out as a string
+and comes back a string. That was settled at 5.2 and the test states it
+positively (`test_raw_is_read_by_field_not_compared_wholesale`) rather than
+leaving it as a footnote somebody later mistakes for a bug.
+
+## `load_accounts` / `load_transactions`
+
+```python
+def load_accounts(conn) -> list[Account]:
+    rows = conn.execute(
+        f"SELECT {', '.join(ACCOUNT_COLUMNS)} FROM accounts ORDER BY id"
+    )
+    return [account_from_row(row) for row in rows]
+```
+
+**Explicit column list, built from the same tuple the writer uses.** Not
+`SELECT *`. Two reasons, and the second is the real one: `*` returns whatever
+order the table happens to have, so a column added in the middle changes what
+`row[n]` means — and more importantly, the writer and reader naming the same
+constant is what guarantees they agree. Add a column to `ACCOUNT_COLUMNS` and
+both halves pick it up.
+
+**No filters, by design.** `main.py` needs all of it, and a date range or an
+account filter designed before something asks for one is guessing at a signature.
+The query is one line; adding a `WHERE` when a caller exists is trivial. Guessing
+wrong and having two callers depend on the wrong shape is not.
+
+**Returning a list, not the cursor.** The conversion has to happen while the
+connection is open, and a caller that received a lazy iterator could outlive it.
+Materializing also means `len()` works, which every consumer already assumes.
+
+## Ordering
+
+```sql
+ORDER BY id                 -- accounts
+ORDER BY date, id           -- transactions
+```
+
+**This was the one thing I checked before writing any code**, because it could
+have moved the baseline at 5.6.
+
+`main.py:48` is `sorted(transactions, key=lambda x: x.date, reverse=True)[:limit]`.
+Python's sort is **stable**, so among transactions sharing a date, the *input*
+order decides what the recent list shows. The fixture has **12 dates with ties**,
+and its fetch order is not the same as `(date, id)` order — so the read path
+could have silently changed the rendered screen.
+
+Two things make that safe:
+
+- **`(date, id)` is a TOTAL order**, because `id` is unique. So the read path
+  cannot depend on the order rows were written in, and re-syncing the same data
+  in a different order produces the same list.
+  `test_read_order_is_total_and_independent_of_write_order` saves the fixture
+  forwards and then reversed, and asserts the read order is identical.
+- **The rendered top ten is unchanged**, verified directly before writing the
+  query. The only tie inside the top ten (2026-07-27, Amex Payment and Chipotle)
+  happens to order the same way under both. That is luck, and it is *checked*
+  luck rather than assumed luck.
+
+The alternative — preserving insertion order via `rowid` — was rejected. It is
+row *position*, which is exactly what `adapters/fingerprint.py` refuses to key
+ids on, and it would make the render depend on the order of a sync.
+
+**Accounts sort by `id`, which happens to match the fixture's fetch order**
+(`acc_1`, `acc_2`, `acc_3`) — checked, not assumed.
+
+---
+
+## What the tests pin
+
+The round trip is the one that matters, and it asserts **field by field, not by
+count**: a reader that returned 76 correctly-shaped transactions with every
+`kind` set to `PURCHASE` would pass a count check.
+
+Beyond it, one test per conversion that does not reverse cleanly — dates, the
+`SourceRef` reassembly, enums, the `bool` cast, `raw` — plus three that guard the
+seams rather than the conversions:
+
+- **`test_loaded_transactions_still_satisfy_model_invariants`** — the model's
+  guards really do run on the way out.
+- **`test_insights_produce_the_same_answers_from_the_database`** — the actual
+  point of the step. `spending_by_category` and `find_recurring` return identical
+  results from adapter output and from database output. Analysis must not be able
+  to tell where its input came from.
+- **`test_a_real_plaid_payload_round_trips`** — the fake fixture carries an empty
+  `raw` on every row, so without this nothing exercises the archive on a real
+  payload: the floats, the null merchant names, the kilobytes, the 401k balance
+  with four decimals. It builds objects through `to_account` / `to_transaction`
+  directly rather than importing `tests/test_conformance.py`, which pins
+  `DATA_SOURCE` and `CSV_PATH` at import and would drag those side effects into
+  this module.
+
+---
+
 ## What this file deliberately does not do
 
 **It never deletes.** A re-sync upserts every row the source returned and leaves

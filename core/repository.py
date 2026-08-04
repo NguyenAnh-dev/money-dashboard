@@ -5,7 +5,14 @@ import sqlite3
 from datetime import date, datetime
 from typing import Any, NamedTuple, Sequence
 
-from core.models import Account, Transaction
+from core.models import (
+    Account,
+    AccountType,
+    Provider,
+    SourceRef,
+    Transaction,
+    TransactionKind,
+)
 
 ACCOUNT_COLUMNS = (
     "id",
@@ -151,3 +158,76 @@ def save(
 def last_synced_at(conn: sqlite3.Connection) -> str | None:
     row = conn.execute("SELECT last_synced_at FROM meta WHERE id = 1").fetchone()
     return None if row is None else row["last_synced_at"]
+
+
+def stored_providers(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute("SELECT DISTINCT provider FROM accounts ORDER BY provider")
+    return [row["provider"] for row in rows]
+
+
+def decode_raw(text: str) -> dict:
+    return json.loads(text)
+
+
+def _to_date(value: str) -> date:
+    return date.fromisoformat(value)
+
+
+def _to_datetime(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+def _source_ref(row: sqlite3.Row) -> SourceRef:
+    return SourceRef(
+        provider=Provider(row["provider"]),
+        provider_id=row["provider_id"],
+        connection_id=row["connection_id"],
+        fetched_at=_to_datetime(row["fetched_at"]),
+    )
+
+
+def account_from_row(row: sqlite3.Row) -> Account:
+    return Account(
+        id=row["id"],
+        source=_source_ref(row),
+        name=row["name"],
+        institution=row["institution"],
+        type=AccountType(row["type"]),
+        balance_cents=row["balance_cents"],
+        currency=row["currency"],
+        mask=row["mask"],
+        available_cents=row["available_cents"],
+        as_of=None if row["as_of"] is None else _to_date(row["as_of"]),
+    )
+
+
+def transaction_from_row(row: sqlite3.Row) -> Transaction:
+    return Transaction(
+        id=row["id"],
+        source=_source_ref(row),
+        account_id=row["account_id"],
+        date=_to_date(row["date"]),
+        name=row["name"],
+        merchant=row["merchant"],
+        amount_cents=row["amount_cents"],
+        category=row["category"],
+        currency=row["currency"],
+        kind=TransactionKind(row["kind"]),
+        pending=bool(row["pending"]),
+        raw=decode_raw(row["raw"]),
+    )
+
+
+def load_accounts(conn: sqlite3.Connection) -> list[Account]:
+    rows = conn.execute(
+        f"SELECT {', '.join(ACCOUNT_COLUMNS)} FROM accounts ORDER BY id"
+    )
+    return [account_from_row(row) for row in rows]
+
+
+def load_transactions(conn: sqlite3.Connection) -> list[Transaction]:
+    rows = conn.execute(
+        f"SELECT {', '.join(TRANSACTION_COLUMNS)} FROM transactions "
+        f"ORDER BY date, id"
+    )
+    return [transaction_from_row(row) for row in rows]

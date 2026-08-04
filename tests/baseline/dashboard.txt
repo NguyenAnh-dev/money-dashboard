@@ -54,4 +54,5 @@
 └────────────┴──────────────┴──────────────┴─────────┘
 
 76 transactions across 3 accounts at 3 institutions
+last synced 2026-08-01 09:00
 

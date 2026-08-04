@@ -45,19 +45,19 @@ def active_source_name() -> str:
     was the only source, and became a lie the moment a Plaid render put real
     balances on screen under it.
 
-    That is the same failure `_get_source` refuses to commit at the bottom of
+    That is the same failure `get_source` refuses to commit at the bottom of
     this file, pointed the other way: a dashboard quietly showing live data
     while claiming to be fake is exactly as wrong as one quietly showing fake
     data while you believe it is live.
 
-    Does NOT validate. An unknown value still fails in `_get_source`, which is
-    where the raise belongs -- and main.py fetches before it prints, so a bad
+    Does NOT validate. An unknown value still fails in `get_source`, which is
+    where the raise belongs -- and sync.py fetches before it prints, so a bad
     DATA_SOURCE never reaches the header.
     """
     return os.environ.get("DATA_SOURCE", DEFAULT_SOURCE).strip().lower()
 
 
-def _get_source():
+def get_source():
     """Return the adapter named by DATA_SOURCE.
 
     Imports INSIDE the branch, so selecting `fake` never imports the Plaid SDK
@@ -97,12 +97,12 @@ def _get_source():
 
 def get_accounts() -> list[Account]:
     """Accounts from the configured source, as core.models.Account."""
-    return _get_source().fetch_accounts()
+    return get_source().fetch_accounts()
 
 
 def get_transactions() -> list[Transaction]:
     """Transactions from the configured source, as core.models.Transaction."""
-    return _get_source().fetch_transactions()
+    return get_source().fetch_transactions()
 
 
 def dollars(cents: int) -> str:

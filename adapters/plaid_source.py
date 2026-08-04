@@ -564,14 +564,13 @@ class PlaidSource:
 
         `_connection_id()` can resolve a missing Item id from /item/get and
         caches it on the instance -- which is fine for a script or a test that
-        holds one adapter. It is useless on the render path, because
-        `data_source._get_source()` builds a FRESH adapter per call and
-        `main()` calls it twice (get_accounts, get_transactions). The cache
-        dies with each instance, so an unset PLAID_ITEM_ID costs two extra
-        network round trips on every single render, silently, forever.
+        holds one adapter. Since 5.7 sync.py holds one too, so the cache does
+        now work there and the cost of an unset PLAID_ITEM_ID is one extra
+        round trip per sync rather than two per render.
 
-        Failing here converts that into a one-line config fix. The value is not
-        a secret and scripts/get_plaid_token.py prints it next to the token.
+        Still refused, because one avoidable network call on the only command
+        that touches the network is worth a one-line config fix. The value is
+        not a secret and scripts/get_plaid_token.py prints it next to the token.
         """
         item_id = os.environ.get("PLAID_ITEM_ID", "").strip()
         if not item_id:
@@ -627,13 +626,13 @@ class PlaidSource:
         makes no network call -- which is what lets the conformance suite build
         one and then skip cleanly when credentials are absent.
 
-        THE CACHE ONLY HELPS A LONG-LIVED INSTANCE. `data_source._get_source()`
-        constructs a new adapter on every call by design (it re-reads
-        DATA_SOURCE per call so tests can change it), so on the render path
-        this resolves at most once per fetch and never carries over. That is
-        why `from_env()` refuses to build without PLAID_ITEM_ID; direct
-        construction keeps the lazy path for scripts and tests, which do hold
-        one instance.
+        THE CACHE ONLY HELPS A LONG-LIVED INSTANCE. `data_source.get_accounts()`
+        and `get_transactions()` each construct a new adapter, so a caller going
+        through them resolves this once per fetch and never carries it over.
+        `data_source.get_source()` exists so sync.py can hold one instance and
+        get the cache; `from_env()` still refuses to build without
+        PLAID_ITEM_ID, and direct construction keeps the lazy path for scripts
+        and tests.
         """
         if self._item_id:
             return self._item_id

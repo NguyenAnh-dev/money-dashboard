@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Use the venv interpreter explicitly — it works identically in PowerShell, cmd, and Git Bash:
 
 ```
-./venv/Scripts/python.exe main.py                           # render the dashboard (fake)
-$env:DATA_SOURCE="csv"; ./venv/Scripts/python.exe main.py   # render from fixtures/bank_export.csv
+./venv/Scripts/python.exe sync.py                           # fetch and store (fake)
+$env:DATA_SOURCE="csv"; ./venv/Scripts/python.exe sync.py   # store fixtures/bank_export.csv
+./venv/Scripts/python.exe main.py                           # render what was stored
 
 ./venv/Scripts/python.exe tests/check_baseline.py           # THE gate — run before every commit
 ./venv/Scripts/python.exe tests/check_baseline.py --update  # rewrite the baseline (deliberate only)
@@ -62,6 +63,17 @@ Namespacing account ids while leaving `transaction.account_id` bare renders a
 byte-identical screen on a completely broken model. Never assume a passing render means
 the model is intact.
 
+**`DB_PATH` became a fourth pin at 5.6, and the gate is unsound without it.** `main.py` now
+renders whatever was last synced, so an unpinned gate would compare the baseline against the
+*user's* `money.db` — a file whose contents depend on when somebody last ran `sync.py`, and
+which may hold live bank data. `_seeded_database()` builds a throwaway database from the
+fixture in a temp directory and syncs it with `BASELINE_SYNCED_AT` fixed, because the footer
+prints `meta.last_synced_at` and an unpinned timestamp would put the wall clock into the
+rendered text. `check_structure()` still reads through `data_source` on purpose: it asks
+whether the *adapter's* model is intact, which is a question about the source rather than
+about what happens to be stored, and it gives a better message than the foreign-key
+violation the same bug would cause during the seed.
+
 Determinism is achieved by rendering in-process through a `Console` with `file=StringIO`,
 `width=80`, `legacy_windows=False`, `no_color=True` — pinning encoding, width, and colour.
 Do **not** replace this with `main.py > file` + `diff`: `rich` picks ASCII vs Unicode box
@@ -89,11 +101,41 @@ Only run `--update` on a change that predicted its own render diff in advance.
 Data flows strictly one direction, and the layering is the point:
 
 ```
-adapters/*  →  core/models  →  insights.py  →  main.py
-(translate)    (vocabulary)    (analysis)      (rich rendering)
-                    ↑
-              data_source.py (selector, reads DATA_SOURCE env var per call)
+  sync.py                                   main.py
+  (fetch + store)                           (read + render)
+      │                                         │
+      ↓                                         ↓
+adapters/*  →  core/models  →  core/repository  →  SQLite  →  core/repository
+(translate)    (vocabulary)    (model → row)      (money.db)   (row → model)
+                    ↑                                              │
+              data_source.py                                       ↓
+              (selector, DATA_SOURCE per call)              insights.py → main.py
+                                                            (analysis)    (rendering)
 ```
+
+**`sync.py` fetches transactions BEFORE accounts, and that is not a slip.** Two fetches are
+two moments. Accounts-first leaves a gap: a transaction for an account opened between the
+calls references an account missing from the list we hold, and the foreign key rejects the
+whole sync — correct, and baffling. Transactions-first makes the account snapshot the
+*later* one, so every account a transaction could reference is already in it. Holding one
+adapter narrows that window; the ordering removes the failure.
+`test_sync_fetches_transactions_before_accounts` pins it, because it reads as an accident
+and invites being "tidied" back. Note this is the *fetch* order —
+`repository.save` still *writes* accounts first, for the same FK, and the two are
+independent.
+
+**Two commands, and rendering never touches the network** (Step 5.1). `sync.py`
+is the only entry point that loads an adapter, needs credentials, or can be made
+slow by a bank. `main.py` imports neither `data_source` nor any adapter —
+`test_main_imports_neither_data_source_nor_any_adapter` pins that structurally,
+by AST rather than by text, because main.py's comments discuss `data_source` at
+length.
+
+The cost of the split, accepted deliberately: **a stale database renders exactly
+as confidently as a fresh one**. That is what `meta.last_synced_at` and the
+footer's `last synced` line exist to answer, and why the header reads its source
+name from the stored rows rather than from `DATA_SOURCE` — see *Project
+conventions*.
 
 - **`core/models.py`** — the app's own vocabulary. **No third-party imports, ever**; the
   moment `plaid` or `requests` appears there the model describes a vendor instead of the
@@ -113,6 +155,11 @@ adapters/*  →  core/models  →  insights.py  →  main.py
 - **`data_source.py`** — selector only. Reads `DATA_SOURCE` **per call**, not at import, so
   tests can change it; imports the adapter *inside* the branch so choosing `fake` never
   loads a provider SDK. An unknown value raises rather than falling back to fake.
+  `get_source()` is **public since 5.7** so a caller can HOLD one adapter and fetch from it
+  twice — `get_accounts()` / `get_transactions()` each build their own, which was two
+  adapters per sync: two file reads for a CSV, and for Plaid two SDK clients plus a second
+  `/item/get`, since `PlaidSource` caches `_client` and `_item_id` **on the instance**. Those
+  two functions are unchanged and remain the convenience path for anything wanting one list.
 - **`adapters/`** — each source translates its records into `core.models`. `fake.py` is the
   reference implementation of the contract: a class with `fetch_accounts()` /
   `fetch_transactions()`, plus module-level `PROVIDER` and `CONNECTION_ID` constants that
@@ -276,12 +323,32 @@ code path.
 - This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 were
   **diff-free refactors** — they moved code and had to leave the render byte-identical.
   Step 5 introduces SQLite, which is why id stability matters now.
-- **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`),
-  via `data_source.active_source_name()`. It was hardcoded through 4.5 so those refactors
-  stayed diff-free; the pin expired at 4.7, when a Plaid render put real balances on screen
-  under the word "fake". That is the failure `_get_source`'s error message argues against,
-  pointed the other way — claiming one thing while showing another. Note the fake render is
-  **byte-identical** either way, which is why fixing this moved no baseline.
+- **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`).
+  It was hardcoded through 4.5 so those refactors stayed diff-free; the pin expired at 4.7,
+  when a Plaid render put real balances on screen under the word "fake". That is the failure
+  `_get_source`'s error message argues against, pointed the other way — claiming one thing
+  while showing another.
+  **At 5.6 the source of that string changed**, and the reason is worth knowing:
+  `active_source_name()` reads `DATA_SOURCE`, which after the sync/render split describes
+  what the *next fetch* would get, not what the screen is *showing*. So
+  `DATA_SOURCE=plaid python main.py` against a fixture-synced database labelled fake data
+  "plaid" — the 4.7 lie again, through a door that only opened when the two commands
+  separated. `main.source_label()` now reads `SELECT DISTINCT provider FROM accounts`, so
+  provenance comes from the rows. It **joins** multiple providers (`csv, fake data`) rather
+  than picking one, because a database can legitimately hold two sources and naming the most
+  recent would mislabel the rest. `active_source_name()` survives, correctly, in `sync.py` —
+  same function, opposite verdict, because that command genuinely is about what is about to
+  be fetched.
+- **The footer's `last synced` line is deliberately absolute, never relative.** "3 days ago"
+  is what a person wants to read and cannot be baselined: the stored timestamp is fixed
+  while `now` moves, so the gate would pass on the day it was recorded and fail every day
+  after. A gate that expires is worse than a less friendly footer.
+- **An empty database gets its own screen**, not four empty tables and a $0.00 net worth —
+  that reads as a broken dashboard rather than an unsynced one, and it is the first thing a
+  new user hits. `main.py` checks the file exists **before** calling `store.open_db()`, which
+  would otherwise *create* it: an empty `money.db` in whatever directory the command ran
+  from, rendering "no data" forever while the real database sits elsewhere. The screen prints
+  the path it looked at, because a misdirected `DB_PATH` produces an identical screen.
 - Comments here explain *why*, often at length, and frequently name the specific bug a
   line prevents. Match that register when editing; don't strip it as verbose.
 - The fixture in `adapters/fake.py` has traps baked in on purpose (Chipotle at a constant

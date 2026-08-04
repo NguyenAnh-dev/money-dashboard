@@ -528,6 +528,258 @@ def test_the_whole_fake_fixture_writes_and_re_writes(db):
     assert stored_txns == len(transactions)
 
 
+# ---------------------------------------------------------------------------
+# 5.5: the read path
+# ---------------------------------------------------------------------------
+
+def test_the_whole_fixture_round_trips(db):
+    """THE test for 5.5. Store the fixture, read it back, assert it matches --
+    field by field, not by count. Everything below this narrows in on one
+    conversion; this is the one that would catch a conversion nobody thought
+    to name."""
+    source = FakeSource()
+    accounts = source.fetch_accounts()
+    transactions = source.fetch_transactions()
+    repository.save(db, accounts, transactions)
+
+    loaded_accounts = repository.load_accounts(db)
+    loaded_txns = repository.load_transactions(db)
+
+    assert len(loaded_accounts) == len(accounts)
+    assert len(loaded_txns) == len(transactions)
+
+    by_id = {a.id: a for a in loaded_accounts}
+    for original in accounts:
+        assert by_id[original.id] == original
+
+    by_id = {t.id: t for t in loaded_txns}
+    for original in transactions:
+        restored = by_id[original.id]
+        for field in (
+            "id", "account_id", "date", "name", "merchant", "amount_cents",
+            "category", "currency", "kind", "pending", "source",
+        ):
+            assert getattr(restored, field) == getattr(original, field), field
+
+
+def test_a_date_comes_back_as_a_date_not_a_string(db):
+    account = _account()
+    repository.save(db, [account], [_transaction(account=account)])
+
+    restored = repository.load_transactions(db)[0]
+    assert restored.date == date(2026, 7, 27)
+    assert isinstance(restored.date, date)
+    assert not isinstance(restored.date, datetime)
+
+
+def test_pending_comes_back_as_a_real_bool(db):
+    """Stored as 0/1, and the model does not guard the field -- so without the
+    cast an int flows all the way through. `1 == True` in Python, which is
+    exactly why this is easy to miss and worth pinning: `is True` fails, and so
+    does anything doing an identity or type check downstream."""
+    account = _account()
+    repository.save(db, [account], [
+        _transaction(provider_id="p", account=account, pending=True),
+        _transaction(provider_id="s", account=account, pending=False),
+    ])
+
+    by_id = {t.source.provider_id: t for t in repository.load_transactions(db)}
+    assert by_id["p"].pending is True
+    assert by_id["s"].pending is False
+
+
+def test_enums_come_back_as_enum_members(db):
+    account = _account(type=AccountType.CREDIT, balance_cents=-1_000)
+    repository.save(db, [account], [
+        _transaction(account=account, kind=TransactionKind.TRANSFER)
+    ])
+
+    assert repository.load_accounts(db)[0].type is AccountType.CREDIT
+    restored = repository.load_transactions(db)[0]
+    assert restored.kind is TransactionKind.TRANSFER
+    assert restored.source.provider is Provider.FAKE
+
+
+def test_source_ref_is_reassembled_from_its_four_columns(db):
+    fetched = datetime(2026, 7, 27, 14, 3, 11)
+    ref = SourceRef(
+        provider=Provider.FAKE,
+        provider_id="acc_1",
+        connection_id="fixture",
+        fetched_at=fetched,
+    )
+    repository.save(db, [_account(source=ref, id=make_id(ref))], [])
+
+    restored = repository.load_accounts(db)[0].source
+    assert restored == ref
+    assert restored.fetched_at == fetched
+
+
+def test_a_null_fetched_at_comes_back_as_none_not_a_string(db):
+    repository.save(db, [_account()], [])
+    assert repository.load_accounts(db)[0].source.fetched_at is None
+
+
+def test_nullable_account_fields_survive_being_absent(db):
+    repository.save(db, [_account()], [])
+
+    restored = repository.load_accounts(db)[0]
+    assert restored.mask is None
+    assert restored.available_cents is None
+    assert restored.as_of is None
+
+
+def test_nullable_account_fields_survive_being_present(db):
+    repository.save(db, [_account(
+        mask="4321", available_cents=99_000, as_of=date(2026, 7, 27)
+    )], [])
+
+    restored = repository.load_accounts(db)[0]
+    assert restored.mask == "4321"
+    assert restored.available_cents == 99_000
+    assert restored.as_of == date(2026, 7, 27)
+
+
+def test_raw_comes_back_as_a_dict(db):
+    account = _account()
+    repository.save(db, [account], [
+        _transaction(account=account, raw={"pending_transaction_id": "abc123"})
+    ])
+
+    restored = repository.load_transactions(db)[0]
+    assert isinstance(restored.raw, dict)
+    assert restored.raw["pending_transaction_id"] == "abc123"
+
+
+def test_raw_is_read_by_field_not_compared_wholesale(db):
+    """The decision made at 5.2, stated as a test. A Plaid row's dates went in
+    as date objects and come back as strings, so dict equality FAILS by design
+    -- what 5.7 depends on is one field, and that survives."""
+    account = _account()
+    original = {"pending_transaction_id": "abc123", "date": date(2026, 7, 27)}
+    repository.save(db, [account], [_transaction(account=account, raw=original)])
+
+    restored = repository.load_transactions(db)[0].raw
+    assert restored != original
+    assert restored["pending_transaction_id"] == original["pending_transaction_id"]
+    assert restored["date"] == "2026-07-27"
+
+
+def test_an_empty_raw_round_trips_exactly(db):
+    account = _account()
+    repository.save(db, [account], [_transaction(account=account)])
+    assert repository.load_transactions(db)[0].raw == {}
+
+
+def test_transactions_come_back_in_date_order(db):
+    source = FakeSource()
+    repository.save(db, source.fetch_accounts(), source.fetch_transactions())
+
+    dates = [t.date for t in repository.load_transactions(db)]
+    assert dates == sorted(dates)
+
+
+def test_read_order_is_total_and_independent_of_write_order(db):
+    """12 fixture dates carry ties, and main.py's recent list sorts with a
+    stable sort -- so a tie order that depended on insertion order would make
+    the render depend on the order rows happened to be written. (date, id) is
+    a TOTAL order because id is unique, so it cannot."""
+    source = FakeSource()
+    accounts = source.fetch_accounts()
+    transactions = source.fetch_transactions()
+
+    repository.save(db, accounts, transactions)
+    forwards = [t.id for t in repository.load_transactions(db)]
+
+    repository.save(db, accounts, list(reversed(transactions)))
+    backwards = [t.id for t in repository.load_transactions(db)]
+
+    assert forwards == backwards
+
+
+def test_reading_an_empty_database_returns_empty_lists(db):
+    assert repository.load_accounts(db) == []
+    assert repository.load_transactions(db) == []
+
+
+def test_the_read_path_returns_everything_unfiltered(db):
+    """No filters by design: main.py needs all of it, and adding a date range
+    or an account filter before something asks for one is guessing at a
+    signature."""
+    source = FakeSource()
+    transactions = source.fetch_transactions()
+    repository.save(db, source.fetch_accounts(), transactions)
+
+    assert len(repository.load_transactions(db)) == len(transactions)
+
+
+def test_loaded_transactions_still_satisfy_model_invariants(db):
+    """The read path builds real model objects, so __post_init__ runs on every
+    row -- which means a corrupted amount or currency in the database fails on
+    load rather than three layers up in a total."""
+    source = FakeSource()
+    repository.save(db, source.fetch_accounts(), source.fetch_transactions())
+
+    for txn in repository.load_transactions(db):
+        assert isinstance(txn.amount_cents, int)
+        assert not isinstance(txn.amount_cents, bool)
+        assert txn.merchant
+        assert txn.currency == txn.currency.upper()
+
+
+def test_insights_produce_the_same_answers_from_the_database(db):
+    """The point of the whole step: analysis must not be able to tell where its
+    input came from. Same functions, same numbers, adapter versus database."""
+    from insights import find_recurring, spending_by_category
+
+    source = FakeSource()
+    accounts = source.fetch_accounts()
+    transactions = source.fetch_transactions()
+    repository.save(db, accounts, transactions)
+    loaded = repository.load_transactions(db)
+
+    assert spending_by_category(loaded) == spending_by_category(transactions)
+    assert find_recurring(loaded) == find_recurring(transactions)
+
+
+def test_a_real_plaid_payload_round_trips(db):
+    """The fake fixture carries an EMPTY raw on every row, so nothing above
+    this exercises the archive on a real payload -- the floats, the nulls, the
+    kilobytes, the 401k balance with four decimal places.
+
+    Built from the recorded fixture through the translation functions directly
+    rather than by importing tests/test_conformance.py, which pins DATA_SOURCE
+    and CSV_PATH at import and would drag those side effects in here."""
+    import json as _json
+
+    from adapters.plaid_source import to_account, to_transaction
+
+    payload = _json.loads(
+        (store.PROJECT_ROOT / "fixtures" / "plaid_sandbox.json").read_text()
+    )
+    item_id = "item_test"
+    accounts = [to_account(a, item_id) for a in payload["accounts"]]
+    transactions = [to_transaction(t, item_id) for t in payload["transactions"]]
+
+    repository.save(db, accounts, transactions)
+
+    loaded = {t.id: t for t in repository.load_transactions(db)}
+    assert len(loaded) == len(transactions)
+
+    for original in transactions:
+        restored = loaded[original.id]
+        assert restored.amount_cents == original.amount_cents
+        assert restored.merchant == original.merchant
+        assert restored.kind == original.kind
+        assert restored.date == original.date
+        assert restored.source == original.source
+        assert restored.raw["transaction_id"] == original.raw["transaction_id"]
+
+    by_id = {a.id: a for a in repository.load_accounts(db)}
+    for original in accounts:
+        assert by_id[original.id] == original
+
+
 def test_every_stored_transaction_joins_to_a_stored_account(db):
     """STRUCTURE's namespacing check, asked of the database. The FK makes this
     impossible to violate, which is the point of having it."""

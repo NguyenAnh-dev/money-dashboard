@@ -42,6 +42,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 
@@ -93,6 +96,8 @@ os.environ["DATA_SOURCE"] = "fake"
 
 BASELINE = Path(__file__).parent / "baseline" / "dashboard.txt"
 
+BASELINE_SYNCED_AT = datetime(2026, 8, 1, 9, 0, 0)
+
 #: Python floor. `X | None` needs 3.10. Note that `Path.read_text(newline=...)`
 #: was only added in 3.13, which is why the file I/O below goes through
 #: `Path.open()` -- read_text with that argument is a TypeError on 3.10-3.12.
@@ -127,14 +132,42 @@ def render() -> str:
     import main as app
 
     buffer = StringIO()
-    app.main(console=Console(
-        file=buffer,
-        width=80,
-        legacy_windows=False,
-        no_color=True,
-        highlight=False,
-    ))
+    with _seeded_database():
+        app.main(console=Console(
+            file=buffer,
+            width=80,
+            legacy_windows=False,
+            no_color=True,
+            highlight=False,
+        ))
     return buffer.getvalue()
+
+
+@contextmanager
+def _seeded_database():
+    from core import repository, store
+    from data_source import get_accounts, get_transactions
+
+    previous = os.environ.get("DB_PATH")
+    with tempfile.TemporaryDirectory(prefix="baseline-db-") as tmp:
+        os.environ["DB_PATH"] = str(Path(tmp) / "baseline.db")
+        conn = store.open_db()
+        try:
+            repository.save(
+                conn,
+                get_accounts(),
+                get_transactions(),
+                synced_at=BASELINE_SYNCED_AT,
+            )
+        finally:
+            conn.close()
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("DB_PATH", None)
+            else:
+                os.environ["DB_PATH"] = previous
 
 
 # ---------------------------------------------------------------------------

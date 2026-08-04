@@ -1,13 +1,11 @@
+import os
+
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from data_source import (
-    active_source_name,
-    dollars,
-    get_accounts,
-    get_transactions,
-)
+from core import repository, store
+from core.money import format_money as dollars
 from insights import total_balance, spending_by_category, find_recurring
 
 # NOTE: there is deliberately no module-level `console`. The rendering target is
@@ -92,6 +90,30 @@ def show_subscriptions(transactions, console):
     console.print(table)
 
 
+def show_no_data(console, path):
+    console.print()
+    console.print("[bold]  MONEY DASHBOARD[/bold]  [dim]v0.1[/dim]")
+    console.print()
+    console.print("  [yellow]No data yet.[/yellow] This screen reads from the "
+                  "database, and nothing has been")
+    console.print("  synced into it. To fetch and store your data:")
+    console.print()
+    console.print("      [bold]python sync.py[/bold]")
+    console.print()
+    console.print(f"  [dim]looked in {path}[/dim]")
+    console.print()
+
+
+def source_label(providers):
+    return ", ".join(providers)
+
+
+def format_synced_at(stamp):
+    if stamp is None:
+        return "never"
+    return stamp.replace("T", " ")[:16]
+
+
 def main(console=None):
     """Render the dashboard.
 
@@ -100,21 +122,28 @@ def main(console=None):
     """
     console = console or Console()
 
-    accounts = get_accounts()
-    transactions = get_transactions()
+    path = store.db_path()
+
+    if not os.path.exists(path):
+        show_no_data(console, path)
+        return
+
+    conn = store.open_db(path)
+    try:
+        accounts = repository.load_accounts(conn)
+        transactions = repository.load_transactions(conn)
+        synced_at = repository.last_synced_at(conn)
+        providers = repository.stored_providers(conn)
+    finally:
+        conn.close()
+
+    if not accounts:
+        show_no_data(console, path)
+        return
 
     console.print()
-    # The label reports the ACTIVE source. It was hardcoded to "fake data"
-    # through 4.1-4.5, which were diff-free refactors -- changing it would have
-    # moved the baseline for a cosmetic reason. That pin expired the moment a
-    # Plaid render put real balances on screen underneath the word "fake",
-    # which is a dashboard claiming one thing while showing another.
-    #
-    # Note this leaves the fake render BYTE-IDENTICAL: active_source_name()
-    # returns "fake" there, so the string is unchanged and the baseline does
-    # not move. Only csv and plaid renders differ.
     console.print(f"[bold]  MONEY DASHBOARD[/bold]  "
-                  f"[dim]v0.1 - {active_source_name()} data[/dim]")
+                  f"[dim]v0.1 - {source_label(providers)} data[/dim]")
     console.print()
 
     show_accounts(accounts, console)
@@ -128,6 +157,7 @@ def main(console=None):
     console.print(f"[dim]{len(transactions)} transactions across "
                   f"{len(accounts)} accounts at "
                   f"{len({a.institution for a in accounts})} institutions[/dim]")
+    console.print(f"[dim]last synced {format_synced_at(synced_at)}[/dim]")
     console.print()
 
 
