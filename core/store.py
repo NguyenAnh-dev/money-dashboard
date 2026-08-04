@@ -41,7 +41,7 @@ from pathlib import Path
 #: first INSERT naming a column that is not there -- or worse, succeed against
 #: a table missing a CHECK we now depend on. The version is the thing that
 #: notices, and it notices at open time rather than mid-sync.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -178,7 +178,20 @@ CREATE TABLE IF NOT EXISTS meta (
     -- NULL until the first sync, and that is the honest state rather than a
     -- placeholder: a database that has been created but never synced has no
     -- "last synced" time, and 0 or "" would both read as a real answer.
-    last_synced_at  TEXT
+    last_synced_at  TEXT,
+
+    -- The provider's resume token (Plaid's next_cursor). NULL for sources that
+    -- have no such concept, which is every source except Plaid.
+    --
+    -- ONE COLUMN IN A ONE-ROW TABLE IS THE WRONG HOME FOR THIS, and it is
+    -- deliberate scaffolding rather than a design. A cursor belongs to a
+    -- CONNECTION -- one Plaid Item -- so a database holding two Items has two
+    -- cursors and exactly one slot to put them in. Today nothing can hit that:
+    -- one adapter is held per sync and only Plaid produces a cursor at all.
+    -- Step 5.8 makes syncs incremental, which is the point where resuming from
+    -- the wrong Item's cursor would silently skip transactions, so the column
+    -- moves to a per-connection row there.
+    sync_cursor     TEXT
 );
 
 -- Each index exists for a query we already know we make.
@@ -252,8 +265,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # file that already had rows; changing that number is a migration's job.
     if is_new:
         conn.execute(
-            "INSERT INTO meta (id, schema_version, last_synced_at) "
-            "VALUES (1, ?, NULL)",
+            "INSERT INTO meta (id, schema_version, last_synced_at, sync_cursor) "
+            "VALUES (1, ?, NULL, NULL)",
             (SCHEMA_VERSION,),
         )
     conn.commit()

@@ -233,6 +233,30 @@ class Transaction:
         _require_int_cents(self.amount_cents, "amount_cents")
 
 
+@dataclass(frozen=True)
+class SyncResult:
+    added: list[Transaction] = field(default_factory=list)
+    modified: list[Transaction] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("added", "modified"):
+            for txn in getattr(self, name):
+                if not isinstance(txn, Transaction):
+                    raise TypeError(
+                        f"SyncResult.{name} holds Transaction objects, got "
+                        f"{type(txn).__name__}"
+                    )
+        for rid in self.removed:
+            if not isinstance(rid, str):
+                raise TypeError(
+                    f"SyncResult.removed holds ids (str), not objects, got "
+                    f"{type(rid).__name__}. A removed row is gone from the "
+                    f"source, so there is nothing left to build an object from."
+                )
+
+
 # ---------------------------------------------------------------------------
 # Invariant guards
 #

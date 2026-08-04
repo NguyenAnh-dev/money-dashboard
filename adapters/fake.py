@@ -35,6 +35,7 @@ from core.models import (
     AccountType,
     Provider,
     SourceRef,
+    SyncResult,
     Transaction,
     TransactionKind,
     make_id,
@@ -130,7 +131,7 @@ class FakeSource:
             for provider_id, name, institution, account_type, balance_cents in rows
         ]
 
-    def fetch_transactions(self) -> list[Transaction]:
+    def fetch_transactions(self) -> SyncResult:
         """Fake transactions spanning May-July 2026, shaped like a real statement.
 
         WHAT MY STEP-3 DETECTOR SHOULD DO (true recurring):
@@ -335,7 +336,7 @@ class FakeSource:
         # now presentation only: the ids were minted from content above and do
         # not depend on where a row lands in this list.
         rows.sort(key=lambda row: row[1])
-        return [
+        return SyncResult(added=[
             Transaction(
                 id=_ns(provider_id),
                 source=_ref(provider_id),
@@ -351,4 +352,4 @@ class FakeSource:
             )
             for provider_id, when, name, merchant, amount_cents, category,
             account_id, pending, kind in rows
-        ]
+        ])

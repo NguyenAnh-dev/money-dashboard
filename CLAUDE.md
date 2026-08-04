@@ -163,7 +163,16 @@ conventions*.
 - **`adapters/`** — each source translates its records into `core.models`. `fake.py` is the
   reference implementation of the contract: a class with `fetch_accounts()` /
   `fetch_transactions()`, plus module-level `PROVIDER` and `CONNECTION_ID` constants that
-  feed every id it mints. Nothing above this layer learns where data came from.
+  feed every id it mints.
+  **`fetch_transactions()` returns a `SyncResult` since 5.7**, not a flat list —
+  `added` / `modified` / `removed` / `cursor`. `removed` holds **ids, not objects**: a row
+  the source dropped is gone, so there is nothing left to build one from. Fake and CSV put
+  everything in `added` with `cursor=None`, which is honest rather than lazy — both hand
+  back complete current state every fetch and genuinely cannot detect a removal. Plaid
+  passes through what `/transactions/sync` returns, mapping `removed` into **our** id space
+  (a bare `transaction_id` would match no stored row). The cursor is **returned but not
+  applied** — resuming is 5.8, and applying it would have broken 5.7's zero-render-diff
+  condition. See `docs/SYNC_RESULT.md`. Nothing above this layer learns where data came from.
   Each adapter sets `kind`: the fixture tags its Amex payments `TRANSFER` and payroll
   `INCOME`; Plaid maps a `KINDS` dict keyed on the **raw**
   `personal_finance_category.primary` constants (`TRANSFER_IN`/`TRANSFER_OUT`/
@@ -442,6 +451,21 @@ code path.
   dropping one of three identical charges renumbers the survivors, so that case arrives as
   *rewrites plus an orphan*, not as a clean deletion — a deletion policy alone does not fix
   it.
+
+  **5.7 supplied the missing input and deliberately did not use it.** `SyncResult.removed`
+  now carries Plaid's `removed` array, mapped into our ids, and `sync.py` ignores it —
+  acting on removals is a behaviour change with a render diff, which 5.7 promised not to
+  produce. The contract now also lets a source say "I cannot know": fake and CSV report
+  `removed=[]` with `cursor=None`, and
+  `test_a_complete_state_source_reports_nothing_removed` holds them to it.
+
+- **The cursor's home is wrong on purpose.** `meta.sync_cursor` is one column in a one-row
+  table, so a database holding two Plaid Items has two cursors and one slot. Nothing can hit
+  it today — one adapter per sync, and only Plaid mints a cursor — but 5.8 makes syncs
+  incremental, which is exactly when resuming from the wrong Item's cursor starts silently
+  skipping transactions. It moves to a per-connection row there. `repository.save` skips the
+  write when `cursor is None` rather than storing NULL, so a fake sync cannot wipe a Plaid
+  token in the meantime.
 
 - **`tests/test_store.py` covers `core/repository.py` too.** Fine at 5.4, where the read
   path does not exist and the file is mostly the schema invariants that 5.3 verified by

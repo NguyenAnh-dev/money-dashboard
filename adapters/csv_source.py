@@ -46,6 +46,7 @@ from core.models import (
     AccountType,
     Provider,
     SourceRef,
+    SyncResult,
     Transaction,
     TransactionKind,
     make_id,
@@ -297,7 +298,7 @@ class CsvSource:
             )
         ]
 
-    def fetch_transactions(self) -> list[Transaction]:
+    def fetch_transactions(self) -> SyncResult:
         """Parse every row of the export into a Transaction.
 
         One minter per fetch (see adapters/fingerprint.ContentIdMinter): its
@@ -333,7 +334,7 @@ class CsvSource:
         # is PRESENTATION only -- every id above was minted from content, so
         # reordering this list changes none of them.
         transactions.sort(key=lambda t: t.date)
-        return transactions
+        return SyncResult(added=transactions)
 
     def _build(self, row: dict, minter: ContentIdMinter, account_id: str) -> Transaction:
         raw_date = row[COLUMNS["date"]]

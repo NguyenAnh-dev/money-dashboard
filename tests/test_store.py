@@ -100,6 +100,7 @@ def test_open_db_creates_both_tables_and_the_meta_row(db):
     assert len(meta) == 1
     assert meta[0]["schema_version"] == store.SCHEMA_VERSION
     assert meta[0]["last_synced_at"] is None
+    assert meta[0]["sync_cursor"] is None
 
 
 def test_opening_an_existing_database_is_idempotent(tmp_path):
@@ -498,6 +499,30 @@ def test_save_stamps_last_synced_at(db):
     assert repository.last_synced_at(db) == "2026-07-28T11:30:15"
 
 
+def test_a_cursor_is_stored_when_the_source_supplies_one(db):
+    repository.save(db, [_account()], [], cursor="cursor-abc")
+    assert repository.sync_cursor(db) == "cursor-abc"
+
+
+def test_a_source_without_a_cursor_does_not_erase_the_stored_one(db):
+    """The reason `save` skips the UPDATE on None rather than writing NULL.
+
+    One meta row holds one cursor, so a `DATA_SOURCE=fake` sync into a database
+    that also holds Plaid rows would otherwise wipe Plaid's resume token -- and
+    the damage is invisible until the next Plaid sync silently refetches from
+    the beginning of time. The real fix is a per-connection cursor at 5.8; this
+    keeps the scaffolding from destroying data in the meantime.
+    """
+    repository.save(db, [_account()], [], cursor="cursor-abc")
+    repository.save(db, [_account()], [], cursor=None)
+
+    assert repository.sync_cursor(db) == "cursor-abc"
+
+
+def test_a_new_database_has_no_cursor(db):
+    assert repository.sync_cursor(db) is None
+
+
 def test_save_defaults_the_stamp_to_now(db):
     before = datetime.now().isoformat(timespec="seconds")
     repository.save(db, [_account()], [])
@@ -514,7 +539,7 @@ def test_the_whole_fake_fixture_writes_and_re_writes(db):
     the Amex transfer, the per-order Amazon descriptors."""
     source = FakeSource()
     accounts = source.fetch_accounts()
-    transactions = source.fetch_transactions()
+    transactions = source.fetch_transactions().added
 
     first = repository.save(db, accounts, transactions)
     assert first.accounts == len(accounts)
@@ -539,7 +564,7 @@ def test_the_whole_fixture_round_trips(db):
     to name."""
     source = FakeSource()
     accounts = source.fetch_accounts()
-    transactions = source.fetch_transactions()
+    transactions = source.fetch_transactions().added
     repository.save(db, accounts, transactions)
 
     loaded_accounts = repository.load_accounts(db)
@@ -673,7 +698,7 @@ def test_an_empty_raw_round_trips_exactly(db):
 
 def test_transactions_come_back_in_date_order(db):
     source = FakeSource()
-    repository.save(db, source.fetch_accounts(), source.fetch_transactions())
+    repository.save(db, source.fetch_accounts(), source.fetch_transactions().added)
 
     dates = [t.date for t in repository.load_transactions(db)]
     assert dates == sorted(dates)
@@ -686,7 +711,7 @@ def test_read_order_is_total_and_independent_of_write_order(db):
     a TOTAL order because id is unique, so it cannot."""
     source = FakeSource()
     accounts = source.fetch_accounts()
-    transactions = source.fetch_transactions()
+    transactions = source.fetch_transactions().added
 
     repository.save(db, accounts, transactions)
     forwards = [t.id for t in repository.load_transactions(db)]
@@ -707,7 +732,7 @@ def test_the_read_path_returns_everything_unfiltered(db):
     or an account filter before something asks for one is guessing at a
     signature."""
     source = FakeSource()
-    transactions = source.fetch_transactions()
+    transactions = source.fetch_transactions().added
     repository.save(db, source.fetch_accounts(), transactions)
 
     assert len(repository.load_transactions(db)) == len(transactions)
@@ -718,7 +743,7 @@ def test_loaded_transactions_still_satisfy_model_invariants(db):
     row -- which means a corrupted amount or currency in the database fails on
     load rather than three layers up in a total."""
     source = FakeSource()
-    repository.save(db, source.fetch_accounts(), source.fetch_transactions())
+    repository.save(db, source.fetch_accounts(), source.fetch_transactions().added)
 
     for txn in repository.load_transactions(db):
         assert isinstance(txn.amount_cents, int)
@@ -734,7 +759,7 @@ def test_insights_produce_the_same_answers_from_the_database(db):
 
     source = FakeSource()
     accounts = source.fetch_accounts()
-    transactions = source.fetch_transactions()
+    transactions = source.fetch_transactions().added
     repository.save(db, accounts, transactions)
     loaded = repository.load_transactions(db)
 
@@ -784,7 +809,7 @@ def test_every_stored_transaction_joins_to_a_stored_account(db):
     """STRUCTURE's namespacing check, asked of the database. The FK makes this
     impossible to violate, which is the point of having it."""
     source = FakeSource()
-    repository.save(db, source.fetch_accounts(), source.fetch_transactions())
+    repository.save(db, source.fetch_accounts(), source.fetch_transactions().added)
 
     orphans = db.execute(
         "SELECT COUNT(*) c FROM transactions t "

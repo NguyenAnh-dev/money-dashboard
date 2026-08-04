@@ -67,6 +67,7 @@ from core.models import (                          # noqa: E402
     AccountType,
     Provider,
     SourceRef,
+    SyncResult,
     Transaction,
     TransactionKind,
     _clean_currency,
@@ -124,8 +125,8 @@ class RecordedPlaidSource:
                 for raw in self._payload["accounts"]]
 
     def fetch_transactions(self):
-        return [to_transaction(raw, self.ITEM_ID)
-                for raw in self._payload["transactions"]]
+        return SyncResult(added=[to_transaction(raw, self.ITEM_ID)
+                                 for raw in self._payload["transactions"]])
 
 
 PLAID_FIXTURE = ROOT / "fixtures" / "plaid_sandbox.json"
@@ -144,6 +145,23 @@ def _source_name(source) -> str:
     return type(source).__name__
 
 
+def _transactions(source) -> list:
+    """The transactions a fetch produced, as one flat list.
+
+    Step 5.7 turned `fetch_transactions()` into a SyncResult, and almost every
+    invariant below is a property of the OBJECTS a source hands back -- ids
+    namespaced, amounts int, merchants non-empty. Those objects live in `added`
+    and `modified`, so the assertions follow them here.
+
+    `removed` is deliberately NOT included, and not because it is empty for
+    every source in ALL_SOURCES today. It holds IDS, not objects: a row the
+    provider dropped is gone, so there is nothing left to check a merchant or a
+    currency on. Its own contract is asserted separately below.
+    """
+    result = source.fetch_transactions()
+    return [*result.added, *result.modified]
+
+
 parametrized = pytest.mark.parametrize(
     "source", ALL_SOURCES, ids=_source_name
 )
@@ -154,7 +172,7 @@ parametrized = pytest.mark.parametrize(
 # ---------------------------------------------------------------------------
 
 @parametrized
-def test_fetch_methods_return_lists(source):
+def test_fetch_accounts_returns_a_list(source):
     """A list, not a generator and not a bare object.
 
     A generator would pass most assertions below on the first pass and then be
@@ -163,12 +181,104 @@ def test_fetch_methods_return_lists(source):
     from a genuine match.
     """
     accounts = source.fetch_accounts()
-    transactions = source.fetch_transactions()
 
     assert isinstance(accounts, list)
-    assert isinstance(transactions, list)
     assert accounts, f"{_source_name(source)} returned no accounts"
-    assert transactions, f"{_source_name(source)} returned no transactions"
+
+
+@parametrized
+def test_fetch_transactions_returns_a_sync_result(source):
+    """5.7 changed this half of the contract: a SyncResult, not a bare list.
+
+    The three collections are all lists for the same reason the old flat return
+    had to be -- a generator would be silently empty on a second read, and
+    `test_two_fetches_produce_identical_ids` could not tell that from a match.
+    """
+    result = source.fetch_transactions()
+
+    assert isinstance(result, SyncResult)
+    assert isinstance(result.added, list)
+    assert isinstance(result.modified, list)
+    assert isinstance(result.removed, list)
+    assert result.added or result.modified, (
+        f"{_source_name(source)} returned no transactions"
+    )
+
+
+@parametrized
+def test_removed_holds_ids_and_never_objects(source):
+    """The one field the object invariants do NOT apply to.
+
+    A removed row is gone from the source -- there is no merchant, no amount and
+    no currency left to check, only the id we minted for it when it was still
+    there. Storing objects here would mean an adapter fabricating a Transaction
+    to describe a deletion, which is a lie the type system would not catch.
+    """
+    result = source.fetch_transactions()
+
+    for rid in result.removed:
+        assert isinstance(rid, str), (
+            f"{_source_name(source)}: removed holds {type(rid).__name__}, "
+            f"expected an id string"
+        )
+        assert rid, "a removed id must not be empty"
+
+
+@parametrized
+def test_a_row_is_never_both_present_and_removed(source):
+    """Contradictory instructions in one payload. Whichever the writer applied
+    last would win, so the result would depend on statement order rather than
+    on what the provider said."""
+    result = source.fetch_transactions()
+    present = {t.id for t in result.added} | {t.id for t in result.modified}
+
+    assert not (present & set(result.removed)), (
+        f"{_source_name(source)}: "
+        f"{sorted(present & set(result.removed))[:3]} are both present and "
+        f"removed in the same fetch"
+    )
+
+
+@parametrized
+def test_added_and_modified_do_not_overlap(source):
+    """One row is either new to us or an update to one we hold, never both."""
+    result = source.fetch_transactions()
+    overlap = {t.id for t in result.added} & {t.id for t in result.modified}
+
+    assert not overlap, (
+        f"{_source_name(source)}: {sorted(overlap)[:3]} appear in both added "
+        f"and modified"
+    )
+
+
+@parametrized
+def test_the_cursor_is_a_string_or_none(source):
+    """`None` means "this source has no resume token", which is the honest
+    answer for a CSV and for the fixture: both hand back complete current state
+    on every fetch, so there is nothing to resume from. An empty string would
+    read as a real cursor and resume from the beginning of time."""
+    cursor = source.fetch_transactions().cursor
+
+    assert cursor is None or (isinstance(cursor, str) and cursor)
+
+
+@parametrized
+def test_a_complete_state_source_reports_nothing_removed(source):
+    """FakeSource and CsvSource cannot know about removal -- a shorter file is
+    indistinguishable from a shorter export -- so they must not claim to. The
+    recorded Plaid payload has no `removed` array either.
+
+    This is the deletion question from CLAUDE.md, narrowed to what the contract
+    can state today: a source that cannot detect removal reports none, rather
+    than guessing.
+    """
+    result = source.fetch_transactions()
+
+    if result.cursor is None:
+        assert result.removed == [], (
+            f"{_source_name(source)} reports removals but has no cursor, so it "
+            f"cannot know what it did not see"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +298,7 @@ def test_transaction_ids_are_unique_and_non_empty(source):
     Note this is the assertion the CSV duplicate-row minter exists to keep
     true: two genuinely identical rows would otherwise hash to one id.
     """
-    ids = [t.id for t in source.fetch_transactions()]
+    ids = [t.id for t in _transactions(source)]
     assert all(ids), "every transaction needs a non-empty id"
     assert len(set(ids)) == len(ids), (
         f"{_source_name(source)}: {len(ids)} rows, {len(set(ids))} distinct ids"
@@ -204,7 +314,7 @@ def test_every_transaction_account_id_resolves(source):
     byte-identical screen on a completely broken model. No diff can catch it.
     """
     account_ids = {a.id for a in source.fetch_accounts()}
-    orphans = {t.account_id for t in source.fetch_transactions()
+    orphans = {t.account_id for t in _transactions(source)
                if t.account_id not in account_ids}
     assert not orphans, (
         f"{_source_name(source)}: {sorted(orphans)[:3]} resolve to no account. "
@@ -222,7 +332,7 @@ def test_ids_are_exactly_what_make_id_produces(source):
     catches an adapter that mints a plausible-looking id from the wrong
     connection, which a prefix check would wave through.
     """
-    for record in [*source.fetch_accounts(), *source.fetch_transactions()]:
+    for record in [*source.fetch_accounts(), *_transactions(source)]:
         assert record.id == make_id(record.source), (
             f"{record.id!r} does not match its own provenance "
             f"{record.source!r}"
@@ -239,7 +349,7 @@ def test_ids_have_three_unescaped_segments(source):
     here as a fourth part, which is exactly the collision `_escape_segment`
     exists to prevent (connection "a:b" + id "c" vs connection "a" + id "b:c").
     """
-    for record in [*source.fetch_accounts(), *source.fetch_transactions()]:
+    for record in [*source.fetch_accounts(), *_transactions(source)]:
         segments = record.id.split(":")
         assert len(segments) == 3, (
             f"{record.id!r} has {len(segments)} segments; a raw colon survived "
@@ -263,8 +373,8 @@ def test_two_fetches_produce_identical_ids(source):
     Compared as ORDERED lists, so an adapter whose ordering wobbles between
     calls fails here rather than surviving on set equality.
     """
-    first = [t.id for t in source.fetch_transactions()]
-    second = [t.id for t in source.fetch_transactions()]
+    first = [t.id for t in _transactions(source)]
+    second = [t.id for t in _transactions(source)]
     assert first == second
 
     assert ([a.id for a in source.fetch_accounts()]
@@ -281,7 +391,7 @@ def test_amounts_are_integer_minor_units(source):
     is True in Python, so a boolean amount would sail through a naive check and
     then behave as 1 cent."""
     values = [a.balance_cents for a in source.fetch_accounts()]
-    values += [t.amount_cents for t in source.fetch_transactions()]
+    values += [t.amount_cents for t in _transactions(source)]
 
     for value in values:
         assert not isinstance(value, bool), f"{value!r} is a bool, not money"
@@ -295,7 +405,7 @@ def test_amounts_are_integer_minor_units(source):
 def test_merchant_is_never_empty(source):
     """Invariant 4. Grouping happens on merchant, so a blank one creates a
     silent catch-all bucket that swallows every row that has it."""
-    for txn in source.fetch_transactions():
+    for txn in _transactions(source):
         assert txn.merchant and txn.merchant.strip(), (
             f"{txn.id}: merchant is {txn.merchant!r} (raw name {txn.name!r})"
         )
@@ -319,7 +429,7 @@ def test_debt_accounts_are_not_positive(source):
 
 @parametrized
 def test_currency_is_a_valid_iso_code(source):
-    for record in [*source.fetch_accounts(), *source.fetch_transactions()]:
+    for record in [*source.fetch_accounts(), *_transactions(source)]:
         assert _CURRENCY_RE.match(record.currency), (
             f"{record.id}: currency {record.currency!r} is not a 3-letter "
             f"ISO-4217 code"
@@ -332,7 +442,7 @@ def test_dates_are_date_objects_not_strings_or_datetimes(source):
     the first comparison, but `datetime` IS a `date` subclass, so it passes
     isinstance and then carries a time component that jitters every gap
     calculation in find_recurring."""
-    for txn in source.fetch_transactions():
+    for txn in _transactions(source):
         assert isinstance(txn.date, date), (
             f"{txn.id}: date is {type(txn.date).__name__}"
         )
@@ -344,7 +454,7 @@ def test_dates_are_date_objects_not_strings_or_datetimes(source):
 
 @parametrized
 def test_pending_is_a_bool(source):
-    for txn in source.fetch_transactions():
+    for txn in _transactions(source):
         assert isinstance(txn.pending, bool)
 
 
@@ -360,7 +470,7 @@ def test_kind_is_a_transaction_kind(source):
     consumers actually do, so it is what this asserts.
     """
     members = list(TransactionKind)
-    for txn in source.fetch_transactions():
+    for txn in _transactions(source):
         assert any(txn.kind is member for member in members), (
             f"{txn.id}: kind is {txn.kind!r} ({type(txn.kind).__name__}); "
             f"insights.py compares it with `is` against a TransactionKind "
@@ -378,7 +488,7 @@ def test_the_fixtures_card_payments_are_tagged_as_transfers():
     and Spending by Category regains $1634.49 that was never spent -- both of
     which a passing render happily displays.
     """
-    transfers = [t for t in FakeSource().fetch_transactions()
+    transfers = [t for t in _transactions(FakeSource())
                  if t.kind is TransactionKind.TRANSFER]
 
     assert {t.merchant for t in transfers} == {"Amex Payment"}
@@ -395,7 +505,7 @@ def test_no_transfer_ever_reaches_the_recurring_table(source):
     detector reports is a transfer -- so it keeps holding if the skip moves, and
     fails if a later refactor drops it.
     """
-    transactions = source.fetch_transactions()
+    transactions = _transactions(source)
     transfer_merchants = {t.merchant for t in transactions
                           if t.kind is TransactionKind.TRANSFER}
 
@@ -416,7 +526,7 @@ def test_no_transfer_ever_reaches_the_recurring_table(source):
 
 def _all_ids(source) -> set[str]:
     return ({a.id for a in source.fetch_accounts()}
-            | {t.id for t in source.fetch_transactions()})
+            | {t.id for t in _transactions(source)})
 
 
 def test_no_id_collides_between_adapters():
@@ -439,7 +549,7 @@ def test_every_id_carries_its_own_providers_prefix(source):
     that is not its own. A copy-paste of fake.py that forgot to change PROVIDER
     would pass every uniqueness check in this file and fail here."""
     providers = {a.source.provider for a in source.fetch_accounts()}
-    providers |= {t.source.provider for t in source.fetch_transactions()}
+    providers |= {t.source.provider for t in _transactions(source)}
     assert len(providers) == 1, f"{_source_name(source)} mints under {providers}"
 
     (provider,) = providers
@@ -458,7 +568,7 @@ def test_the_source_list_covers_every_provider_that_has_an_adapter():
     covered = {type(s).__name__: s for s in ALL_SOURCES}
     assert len(covered) == len(ALL_SOURCES), "ALL_SOURCES has a duplicate class"
 
-    tested = {next(iter({t.source.provider for t in s.fetch_transactions()}))
+    tested = {next(iter({t.source.provider for t in _transactions(s)}))
               for s in ALL_SOURCES}
 
     not_yet = set(Provider) - tested
@@ -567,7 +677,7 @@ def test_the_live_plaid_source_still_honours_the_contract():
 
     source = PlaidSource.from_env()
     accounts = source.fetch_accounts()
-    transactions = source.fetch_transactions()
+    transactions = _transactions(source)
 
     assert accounts and transactions
 

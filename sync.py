@@ -6,14 +6,19 @@ from core import repository, store
 from data_source import active_source_name, get_source
 
 
-def sync() -> repository.SyncResult:
+def sync() -> repository.SaveResult:
     source = get_source()
-    transactions = source.fetch_transactions()
+    result = source.fetch_transactions()
     accounts = source.fetch_accounts()
 
     conn = store.open_db()
     try:
-        return repository.save(conn, accounts, transactions)
+        return repository.save(
+            conn,
+            accounts,
+            [*result.added, *result.modified],
+            cursor=result.cursor,
+        )
     finally:
         conn.close()
 

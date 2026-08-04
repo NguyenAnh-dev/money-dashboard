@@ -193,7 +193,7 @@ def test_dates_parse_as_month_day_year(source):
     """05/08/2026 is May 8th, not August 5th. The two readings are
     indistinguishable for the first twelve days of every month, so this is
     pinned on a row where they differ."""
-    txns = source.fetch_transactions()
+    txns = source.fetch_transactions().added
 
     hulus = sorted(t.date for t in txns if t.merchant == "Hulu")
     assert hulus == [date(2026, 5, 8), date(2026, 6, 8), date(2026, 7, 8)]
@@ -209,7 +209,7 @@ def test_dates_parse_as_month_day_year(source):
 
 
 def test_amounts_are_ints_in_our_sign_convention(source):
-    txns = source.fetch_transactions()
+    txns = source.fetch_transactions().added
     assert all(type(t.amount_cents) is int for t in txns)
 
     hulu = [t for t in txns if t.merchant == "Hulu"]
@@ -223,13 +223,13 @@ def test_amounts_are_ints_in_our_sign_convention(source):
 
 def test_thousands_separator_row_survives_the_round_trip(source):
     """$1,204.77 in the file must be 120477 cents, not 120 or 1204."""
-    costco = [t for t in source.fetch_transactions()
+    costco = [t for t in source.fetch_transactions().added
               if t.merchant == "Costco" and t.date == date(2026, 5, 28)]
     assert [t.amount_cents for t in costco] == [120477]
 
 
 def test_currency_and_pending_are_set(source):
-    txns = source.fetch_transactions()
+    txns = source.fetch_transactions().added
     assert all(t.currency == CURRENCY for t in txns)
     assert not any(t.pending for t in txns)
 
@@ -239,11 +239,11 @@ def test_every_transaction_resolves_to_the_account(source):
     transaction to its account, so a bare account_id renders perfectly."""
     account_ids = {a.id for a in source.fetch_accounts()}
     assert account_ids
-    assert {t.account_id for t in source.fetch_transactions()} <= account_ids
+    assert {t.account_id for t in source.fetch_transactions().added} <= account_ids
 
 
 def test_transactions_come_back_in_date_order(source):
-    dates = [t.date for t in source.fetch_transactions()]
+    dates = [t.date for t in source.fetch_transactions().added]
     assert dates == sorted(dates)
 
 
@@ -256,8 +256,8 @@ def test_ids_are_stable_across_two_reads(source):
     fetches of the same unchanged file must produce the same ids, in the same
     order -- including for the duplicate-content rows, whose occurrence
     counter lives on a fresh minter each time."""
-    first = [t.id for t in source.fetch_transactions()]
-    second = [t.id for t in CsvSource(path=FIXTURE).fetch_transactions()]
+    first = [t.id for t in source.fetch_transactions().added]
+    second = [t.id for t in CsvSource(path=FIXTURE).fetch_transactions().added]
     assert first == second
     assert len(set(first)) == len(first), "ids must be unique within one fetch"
 
@@ -273,8 +273,8 @@ def test_ids_do_not_depend_on_row_order(tmp_path):
     shuffled.write_text("\n".join([header, *reversed(rows)]) + "\n",
                         encoding="utf-8")
 
-    original = {t.id for t in CsvSource(path=FIXTURE).fetch_transactions()}
-    reordered = {t.id for t in CsvSource(path=str(shuffled)).fetch_transactions()}
+    original = {t.id for t in CsvSource(path=FIXTURE).fetch_transactions().added}
+    reordered = {t.id for t in CsvSource(path=str(shuffled)).fetch_transactions().added}
     assert original == reordered
 
 
@@ -290,8 +290,8 @@ def test_inserting_a_row_rekeys_only_that_row(tmp_path):
         encoding="utf-8",
     )
 
-    before = {t.id for t in CsvSource(path=FIXTURE).fetch_transactions()}
-    after = {t.id for t in CsvSource(path=str(injected)).fetch_transactions()}
+    before = {t.id for t in CsvSource(path=FIXTURE).fetch_transactions().added}
+    after = {t.id for t in CsvSource(path=str(injected)).fetch_transactions().added}
     assert before < after
     assert len(after - before) == 1
 
@@ -302,11 +302,11 @@ def test_csv_ids_cannot_collide_with_fixture_ids():
     as a fixture row, "csv:..." and "fake:..." are different keys."""
     from adapters.fake import FakeSource
 
-    csv_ids = {t.id for t in CsvSource(path=FIXTURE).fetch_transactions()}
+    csv_ids = {t.id for t in CsvSource(path=FIXTURE).fetch_transactions().added}
     csv_ids |= {a.id for a in CsvSource(path=FIXTURE).fetch_accounts()}
 
     fake = FakeSource()
-    fake_ids = {t.id for t in fake.fetch_transactions()}
+    fake_ids = {t.id for t in fake.fetch_transactions().added}
     fake_ids |= {a.id for a in fake.fetch_accounts()}
 
     assert not (csv_ids & fake_ids)
@@ -315,7 +315,7 @@ def test_csv_ids_cannot_collide_with_fixture_ids():
 
 def test_ids_carry_typed_provenance(source):
     """Provenance is READ off SourceRef, never parsed back out of the id."""
-    txn = source.fetch_transactions()[0]
+    txn = source.fetch_transactions().added[0]
     assert txn.source.provider is Provider.CSV
     assert txn.source.connection_id == "bank_export"
 
@@ -359,7 +359,7 @@ def test_the_subscription_is_detected_with_its_price_rise(source):
     find the subscription in a CSV it knows nothing about."""
     from insights import find_recurring
 
-    charges = {c.merchant: c for c in find_recurring(source.fetch_transactions())}
+    charges = {c.merchant: c for c in find_recurring(source.fetch_transactions().added)}
     assert "Hulu" in charges
 
     hulu = charges["Hulu"]
@@ -376,5 +376,5 @@ def test_the_noise_is_not_flagged_as_recurring(source):
     July. Both are the shapes a naive "seen every month" rule would flag."""
     from insights import find_recurring
 
-    merchants = {c.merchant for c in find_recurring(source.fetch_transactions())}
+    merchants = {c.merchant for c in find_recurring(source.fetch_transactions().added)}
     assert merchants == {"Hulu"}

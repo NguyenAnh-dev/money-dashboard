@@ -27,6 +27,7 @@ from core.models import (
     AccountType,
     Provider,
     SourceRef,
+    SyncResult,
     make_id,
 )
 
@@ -121,7 +122,7 @@ def test_the_empty_screen_names_the_path_it_looked_at(tmp_path, monkeypatch):
 def test_the_header_reads_the_provider_from_the_rows(tmp_path, monkeypatch):
     path = tmp_path / "fake.db"
     source = FakeSource()
-    _seed(path, source.fetch_accounts(), source.fetch_transactions())
+    _seed(path, source.fetch_accounts(), source.fetch_transactions().added)
 
     assert "v0.1 - fake data" in _render(path, monkeypatch)
 
@@ -134,7 +135,7 @@ def test_the_header_ignores_data_source(tmp_path, monkeypatch):
     opened when sync and render split."""
     path = tmp_path / "fake.db"
     source = FakeSource()
-    _seed(path, source.fetch_accounts(), source.fetch_transactions())
+    _seed(path, source.fetch_accounts(), source.fetch_transactions().added)
 
     monkeypatch.setenv("DATA_SOURCE", "plaid")
     output = _render(path, monkeypatch)
@@ -170,7 +171,7 @@ def test_the_footer_reports_the_stored_sync_time(tmp_path, monkeypatch):
     is the only thing on screen that says which one you are looking at."""
     path = tmp_path / "fake.db"
     source = FakeSource()
-    _seed(path, source.fetch_accounts(), source.fetch_transactions(),
+    _seed(path, source.fetch_accounts(), source.fetch_transactions().added,
           synced_at=datetime(2026, 7, 4, 18, 45, 30))
 
     assert "last synced 2026-07-04 18:45" in _render(path, monkeypatch)
@@ -191,7 +192,7 @@ def test_the_footer_is_absolute_never_relative(tmp_path, monkeypatch):
     slightly less friendly footer."""
     path = tmp_path / "fake.db"
     source = FakeSource()
-    _seed(path, source.fetch_accounts(), source.fetch_transactions(),
+    _seed(path, source.fetch_accounts(), source.fetch_transactions().added,
           synced_at=datetime(2020, 1, 1, 0, 0))
 
     output = _render(path, monkeypatch)
@@ -208,7 +209,7 @@ def test_the_same_database_renders_identically_twice(tmp_path, monkeypatch):
     """No wall clock, no environment, no network anywhere in the read path."""
     path = tmp_path / "fake.db"
     source = FakeSource()
-    _seed(path, source.fetch_accounts(), source.fetch_transactions())
+    _seed(path, source.fetch_accounts(), source.fetch_transactions().added)
 
     assert _render(path, monkeypatch) == _render(path, monkeypatch)
 
@@ -256,7 +257,7 @@ def test_sync_fetches_transactions_before_accounts(tmp_path, monkeypatch):
 
         def fetch_transactions(self):
             calls.append("transactions")
-            return []
+            return SyncResult()
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "sync.db"))
     monkeypatch.setattr(sync_module, "get_source", lambda: Recording())
@@ -274,7 +275,7 @@ def test_sync_writes_what_the_source_returned(tmp_path, monkeypatch):
 
     source = FakeSource()
     assert result.accounts == len(source.fetch_accounts())
-    assert result.transactions == len(source.fetch_transactions())
+    assert result.transactions == len(source.fetch_transactions().added)
 
 
 def test_main_imports_neither_data_source_nor_any_adapter():

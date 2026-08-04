@@ -102,7 +102,8 @@ def get_accounts() -> list[Account]:
 
 def get_transactions() -> list[Transaction]:
     """Transactions from the configured source, as core.models.Transaction."""
-    return get_source().fetch_transactions()
+    result = get_source().fetch_transactions()
+    return [*result.added, *result.modified]
 
 
 def dollars(cents: int) -> str:

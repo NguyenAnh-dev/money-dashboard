@@ -49,7 +49,7 @@ TRANSACTION_COLUMNS = (
 )
 
 
-class SyncResult(NamedTuple):
+class SaveResult(NamedTuple):
     accounts: int
     transactions: int
     synced_at: str
@@ -140,7 +140,8 @@ def save(
     accounts: Sequence[Account],
     transactions: Sequence[Transaction],
     synced_at: datetime | None = None,
-) -> SyncResult:
+    cursor: str | None = None,
+) -> SaveResult:
     accounts = list(accounts)
     transactions = list(transactions)
     stamp = (synced_at or datetime.now()).isoformat(timespec="seconds")
@@ -151,8 +152,17 @@ def save(
         conn.execute(
             "UPDATE meta SET last_synced_at = ? WHERE id = 1", (stamp,)
         )
+        if cursor is not None:
+            conn.execute(
+                "UPDATE meta SET sync_cursor = ? WHERE id = 1", (cursor,)
+            )
 
-    return SyncResult(len(accounts), len(transactions), stamp)
+    return SaveResult(len(accounts), len(transactions), stamp)
+
+
+def sync_cursor(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT sync_cursor FROM meta WHERE id = 1").fetchone()
+    return None if row is None else row["sync_cursor"]
 
 
 def last_synced_at(conn: sqlite3.Connection) -> str | None:

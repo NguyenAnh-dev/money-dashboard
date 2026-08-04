@@ -48,6 +48,7 @@ from core.models import (
     AccountType,
     Provider,
     SourceRef,
+    SyncResult,
     Transaction,
     TransactionKind,
     make_id,
@@ -470,6 +471,12 @@ def to_account(raw: dict, item_id: str) -> Account:
     )
 
 
+def _sorted(records, item_id: str) -> list[Transaction]:
+    transactions = [to_transaction(r.to_dict(), item_id) for r in records]
+    transactions.sort(key=lambda t: (t.date, t.id))
+    return transactions
+
+
 def to_transaction(raw: dict, item_id: str) -> Transaction:
     """One Plaid transaction dict -> Transaction.
 
@@ -656,8 +663,8 @@ class PlaidSource:
         return [to_account(account.to_dict(), item_id)
                 for account in response["accounts"]]
 
-    def fetch_transactions(self) -> list[Transaction]:
-        """Every transaction, following the sync cursor to the end.
+    def fetch_transactions(self) -> SyncResult:
+        """Every change /transactions/sync reports, plus the cursor to resume at.
 
         `has_more` is the ONLY correct stop condition. An empty page is not the
         end and neither is a short one -- /transactions/sync paginates on its
@@ -666,11 +673,17 @@ class PlaidSource:
         Sorted by date on the way out, matching what the other two adapters
         hand back, so `test_two_fetches_produce_identical_ids` compares a
         stable order rather than whatever order the pages happened to arrive in.
+
+        THE CURSOR IS RETURNED, NOT APPLIED. This still starts from no cursor on
+        every call, so it still fetches everything -- 5.7 is plumbing, and a
+        render diff would mean it was not. Resuming from a stored cursor is 5.8,
+        and it is a behaviour change with its own failure modes: a cursor that
+        resumes too far forward silently skips transactions.
         """
         from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
         item_id = self._connection_id()
-        added, cursor = [], None
+        added, modified, removed, cursor = [], [], [], None
         while True:
             # Cursor passed to the CONSTRUCTOR, not assigned afterwards.
             # Post-construction assignment does work on plaid-python 42 (these
@@ -686,10 +699,19 @@ class PlaidSource:
             response = self._api().transactions_sync(
                 TransactionsSyncRequest(**kwargs))
             added.extend(response["added"])
+            modified.extend(response["modified"])
+            removed.extend(response["removed"])
             cursor = response["next_cursor"]
             if not response["has_more"]:
                 break
 
-        transactions = [to_transaction(t.to_dict(), item_id) for t in added]
-        transactions.sort(key=lambda t: (t.date, t.id))
-        return transactions
+        return SyncResult(
+            added=_sorted(added, item_id),
+            modified=_sorted(modified, item_id),
+            # `removed` carries only a transaction_id -- the row is gone, so
+            # there is nothing else left to carry. Mapped into OUR id space
+            # here, because a bare Plaid id matches no row we ever stored.
+            removed=[make_id(_ref(r["transaction_id"], item_id))
+                     for r in removed],
+            cursor=cursor,
+        )

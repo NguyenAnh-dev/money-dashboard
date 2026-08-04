@@ -467,8 +467,10 @@ class _PagingClient:
     which would loop until the process died.
     """
 
-    def __init__(self, pages: list[list[dict]]) -> None:
+    def __init__(self, pages, modified=None, removed=None) -> None:
         self._pages = pages
+        self._modified = modified or [[] for _ in pages]
+        self._removed = removed or [[] for _ in pages]
         self.cursors_seen: list[str | None] = []
 
     def transactions_sync(self, request):
@@ -480,6 +482,8 @@ class _PagingClient:
         index = len(self.cursors_seen) - 1
         return {
             "added": [_FakeSdkTransaction(t) for t in self._pages[index]],
+            "modified": [_FakeSdkTransaction(t) for t in self._modified[index]],
+            "removed": self._removed[index],
             "next_cursor": f"cursor-{index + 1}",
             "has_more": index + 1 < len(self._pages),
         }
@@ -511,9 +515,9 @@ def test_fetch_transactions_follows_the_cursor_across_pages():
     client = _PagingClient(pages)
     source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
 
-    transactions = source.fetch_transactions()
+    result = source.fetch_transactions()
 
-    assert [t.source.provider_id for t in transactions] == ["t1", "t2", "t3", "t4"]
+    assert [t.source.provider_id for t in result.added] == ["t1", "t2", "t3", "t4"]
     # First request carries no cursor; each subsequent one carries the previous
     # response's next_cursor.
     assert client.cursors_seen == [None, "cursor-1", "cursor-2"]
@@ -526,8 +530,86 @@ def test_fetch_transactions_stops_after_one_page_when_has_more_is_false():
     client = _PagingClient([[_plaid_txn("t1", 1)]])
     source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
 
-    assert len(source.fetch_transactions()) == 1
+    assert len(source.fetch_transactions().added) == 1
     assert client.cursors_seen == [None]
+
+
+def test_modified_transactions_are_translated_like_added_ones():
+    """/transactions/sync reports an amended charge under `modified`, not
+    `added`. Through 5.6 the adapter read only `added`, so a tip adjustment or
+    a corrected amount was silently discarded and the stale row survived."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient(
+        pages=[[_plaid_txn("t1", 1)]],
+        modified=[[_plaid_txn("t2", 2)]],
+    )
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+    result = source.fetch_transactions()
+
+    assert [t.source.provider_id for t in result.added] == ["t1"]
+    assert [t.source.provider_id for t in result.modified] == ["t2"]
+
+
+def test_removed_ids_are_translated_into_our_id_space():
+    """A bare Plaid transaction_id matches no row we ever stored -- every id in
+    the database is provider:connection:provider_id. Handing the raw value up
+    would produce a delete that silently matches nothing."""
+    from adapters.plaid_source import PlaidSource
+    from core.models import Provider, SourceRef, make_id
+
+    client = _PagingClient(
+        pages=[[_plaid_txn("t1", 1)]],
+        removed=[[{"transaction_id": "gone_1"}]],
+    )
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+    result = source.fetch_transactions()
+
+    expected = make_id(SourceRef(
+        provider=Provider.PLAID,
+        provider_id="gone_1",
+        connection_id=ITEM_ID,
+    ))
+    assert result.removed == [expected]
+    assert result.removed[0].startswith("plaid:")
+
+
+def test_the_cursor_survives_to_the_caller():
+    """5.6 followed the cursor across pages and then threw it away, so every
+    sync restarted from the beginning of time. Returning it is what makes 5.8
+    possible."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient([[_plaid_txn("t1", 1)], [_plaid_txn("t2", 2)]])
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+
+    assert source.fetch_transactions().cursor == "cursor-2"
+
+
+def test_the_cursor_is_still_not_applied_on_the_way_in():
+    """5.7 is plumbing. The first request must carry no cursor, so a fetch
+    still returns everything and no render can move. Resuming is 5.8."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient([[_plaid_txn("t1", 1)]])
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+    source.fetch_transactions()
+
+    assert client.cursors_seen == [None]
+
+
+def test_removals_across_pages_all_survive():
+    """Same accumulate-then-stop rule as `added`: a removal on page one is not
+    dropped because page two also had one."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient(
+        pages=[[_plaid_txn("t1", 1)], [_plaid_txn("t2", 2)]],
+        removed=[[{"transaction_id": "gone_1"}], [{"transaction_id": "gone_2"}]],
+    )
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+
+    assert len(source.fetch_transactions().removed) == 2
 
 
 def test_an_access_token_is_required():
