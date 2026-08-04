@@ -353,3 +353,32 @@ code path.
   `_CREDIT_CARD_PAYMENT`, so this one primary can be keyed on `detailed` when it matters. It
   buys nothing today and still would not fix the real gap — the interest belongs in spending
   and no field says how much of the amount it is.
+
+## Open questions (Step 5)
+
+- **Deletion policy: a row that vanishes from the source survives forever.**
+  `repository.save` upserts every row the fetch returned and touches nothing else, so a
+  pending charge the bank dropped, or a row removed by a corrected re-export, stays in the
+  database with no way out. Not an oversight — the obvious rule is actively dangerous.
+  "Delete anything not in this fetch" is catastrophic against a source that returns a
+  rolling window: Plaid's default `/transactions/get` range would delete every row older
+  than it on the first sync, and no adapter currently states the window it fetched.
+
+  **The answer is very likely per-adapter rather than one rule**, which is why it cannot be
+  settled in `repository.py`. Plaid's `/transactions/sync` hands back an explicit `removed`
+  array — the source *tells* you, so nothing has to be inferred. A CSV and the fixture have
+  no concept of removal at all: a shorter file is indistinguishable from a shorter export.
+  So the contract probably grows a way for an adapter to say "here is what was removed" or
+  "I cannot know", and the sources that cannot know never delete.
+
+  Note this interacts with the CSV duplicate-row ceiling already documented under **IDs**:
+  dropping one of three identical charges renumbers the survivors, so that case arrives as
+  *rewrites plus an orphan*, not as a clean deletion — a deletion policy alone does not fix
+  it.
+
+- **`tests/test_store.py` covers `core/repository.py` too.** Fine at 5.4, where the read
+  path does not exist and the file is mostly the schema invariants that 5.3 verified by
+  hand. If the 5.5 read path grows enough to need real coverage, split it — the split is
+  along the same seam as the modules themselves (`store` owns the file, `repository` owns
+  the row↔model translation), not along "5.3 tests" and "5.4 tests". A judgment call for
+  5.5, not a fix owed now.
