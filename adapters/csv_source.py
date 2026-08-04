@@ -45,6 +45,7 @@ from core.models import (
     Account,
     AccountType,
     Provider,
+    ConnectionRef,
     SourceRef,
     SyncResult,
     Transaction,
@@ -298,7 +299,10 @@ class CsvSource:
             )
         ]
 
-    def fetch_transactions(self) -> SyncResult:
+    def connection(self) -> ConnectionRef:
+        return ConnectionRef(provider=PROVIDER, connection_id=CONNECTION_ID)
+
+    def fetch_transactions(self, cursor: str | None = None) -> SyncResult:
         """Parse every row of the export into a Transaction.
 
         One minter per fetch (see adapters/fingerprint.ContentIdMinter): its

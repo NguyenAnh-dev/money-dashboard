@@ -377,17 +377,16 @@ code path.
 
 ## Deferred, on purpose
 
-- **Pending → posted reconciliation is Step 5 work**, not now. Today a pending row is just
-  a row with a flag: nothing reconciles it when it settles, because with no database there
-  is nothing to reconcile *against* — each run rebuilds every transaction from scratch. At
-  Step 5 the same charge arrives twice, pending then posted, and the id decides what
-  happens. Our content-hash ids deliberately exclude `pending` (see `adapters/fake.py`'s
-  `add()`), so a row that only flips its flag keeps its id and the upsert updates it. What
-  is *not* solved: a settling charge whose **amount or date moves** — a tip added, an
-  authorization posting a day later — rehashes to a new id and inserts a second row
-  alongside the stale pending one. Plaid sidesteps this by supplying its own id and
-  swapping it on settle; a CSV cannot. Decide the strategy when the database exists, not
-  by pre-emptively weakening the hash.
+- **Pending → posted reconciliation: DONE at 5.8, and only half of it needed solving.**
+  Our content-hash ids deliberately exclude `pending` (see `adapters/fake.py`'s `add()`), so
+  a row that only flips its flag keeps its id and the upsert updates it in place — that half
+  never needed code. The other half, a settling charge whose **amount or date moves** (a tip
+  added, an authorization posting a day later), rehashes to a new id and would insert a
+  second row beside the stale pending one. 5.8 fixes that wherever the source *states* the
+  link: `raw["pending_transaction_id"]` names the row being replaced, and
+  `repository.superseded_id` deletes it in the same transaction. Keyed on the field, not on
+  the provider. Still unsolvable from a CSV, where the information was never exported — see
+  the reconciliation entry under **Open questions**.
 - **`Account.institution` is hardcoded to `"Plaid"`** for every Plaid account, so a Plaid
   render reports "3 institutions" as 1 and the net-worth panel's "across all banks" is
   aspirational. The real name needs a second API call (`/institutions/get_by_id` off
@@ -432,40 +431,40 @@ code path.
 
 ## Open questions (Step 5)
 
-- **Deletion policy: a row that vanishes from the source survives forever.**
-  `repository.save` upserts every row the fetch returned and touches nothing else, so a
-  pending charge the bank dropped, or a row removed by a corrected re-export, stays in the
-  database with no way out. Not an oversight — the obvious rule is actively dangerous.
-  "Delete anything not in this fetch" is catastrophic against a source that returns a
-  rolling window: Plaid's default `/transactions/get` range would delete every row older
-  than it on the first sync, and no adapter currently states the window it fetched.
+- **Deletion policy: SETTLED at 5.8 — hard delete, on an explicit signal only.**
+  `SyncResult.removed` carries ids the source states it no longer has, and `repository.save`
+  deletes those rows inside the same transaction as the write. Hard, not a superseded flag:
+  a ghost row would need filtering in `find_recurring`, `spending_by_category`, the recent
+  list and the count — four places to forget, each failing silently by counting money that
+  is gone.
+  What makes it safe is that it is never *inferred*. "Delete anything not in this fetch"
+  remains catastrophic against a rolling window, so a source that cannot detect removal
+  reports `removed=[]` and never deletes; `test_a_complete_state_source_reports_nothing_removed`
+  holds fake and CSV to that.
+  **A removal matching zero rows is counted, not shrugged at.** `DELETE ... WHERE id = ?`
+  against a nonexistent id succeeds silently, which is the failure the 5.7 id mapping
+  exists to prevent — so `delete_transactions` checks existence first and `sync.py` warns on
+  `unmatched`. Reported rather than raised: a provider can legitimately withdraw a charge
+  that arrived and vanished between two syncs, and aborting would break a sync for a benign
+  reason. The existence check is chunked (`DELETE_CHUNK`) because SQLite caps host
+  parameters per statement. See `docs/DELETION.md`.
 
-  **The answer is very likely per-adapter rather than one rule**, which is why it cannot be
-  settled in `repository.py`. Plaid's `/transactions/sync` hands back an explicit `removed`
-  array — the source *tells* you, so nothing has to be inferred. A CSV and the fixture have
-  no concept of removal at all: a shorter file is indistinguishable from a shorter export.
-  So the contract probably grows a way for an adapter to say "here is what was removed" or
-  "I cannot know", and the sources that cannot know never delete.
-
-  Note this interacts with the CSV duplicate-row ceiling already documented under **IDs**:
-  dropping one of three identical charges renumbers the survivors, so that case arrives as
-  *rewrites plus an orphan*, not as a clean deletion — a deletion policy alone does not fix
-  it.
-
-  **5.7 supplied the missing input and deliberately did not use it.** `SyncResult.removed`
-  now carries Plaid's `removed` array, mapped into our ids, and `sync.py` ignores it —
-  acting on removals is a behaviour change with a render diff, which 5.7 promised not to
-  produce. The contract now also lets a source say "I cannot know": fake and CSV report
-  `removed=[]` with `cursor=None`, and
-  `test_a_complete_state_source_reports_nothing_removed` holds them to it.
-
-- **The cursor's home is wrong on purpose.** `meta.sync_cursor` is one column in a one-row
-  table, so a database holding two Plaid Items has two cursors and one slot. Nothing can hit
-  it today — one adapter per sync, and only Plaid mints a cursor — but 5.8 makes syncs
-  incremental, which is exactly when resuming from the wrong Item's cursor starts silently
-  skipping transactions. It moves to a per-connection row there. `repository.save` skips the
-  write when `cursor is None` rather than storing NULL, so a fake sync cannot wipe a Plaid
-  token in the meantime.
+- **Pending → settled reconciliation: SETTLED at 5.8, for sources that state the link.**
+  A settled transaction naming `raw["pending_transaction_id"]` causes the row it replaces to
+  be deleted in the same transaction. Keyed on the **field's presence, not the provider** —
+  any source adopting the convention inherits it, and fake and CSV need nothing because
+  their ids survive settlement (the content hash excludes `pending`), so the upsert already
+  updates in place. The prior id is mapped through `make_id` for the same reason `removed`
+  is: the raw provider id would match nothing, silently.
+  Two deliberate asymmetries: a self-naming row is skipped (it would delete what it just
+  wrote), and a **missing pending twin is NOT reported as unmatched** — a charge that posts
+  between two syncs is only ever seen settled, so missing is the common case, and folding it
+  into the warning would train everyone to ignore the warning that matters. That is why
+  `delete_transactions` is called twice rather than on one concatenated list.
+  **Still open: the amount-drift case.** A charge whose amount or date moves on settling
+  rehashes to a new id and inserts a second row beside the stale pending one. Solved for
+  Plaid, which states the link; unsolvable from a CSV, where the information was never
+  exported. A ceiling on file-based sources, matching the duplicate-row limit under **IDs**.
 
 - **`tests/test_store.py` covers `core/repository.py` too.** Fine at 5.4, where the read
   path does not exist and the file is mostly the schema invariants that 5.3 verified by

@@ -586,9 +586,9 @@ def test_the_cursor_survives_to_the_caller():
     assert source.fetch_transactions().cursor == "cursor-2"
 
 
-def test_the_cursor_is_still_not_applied_on_the_way_in():
-    """5.7 is plumbing. The first request must carry no cursor, so a fetch
-    still returns everything and no render can move. Resuming is 5.8."""
+def test_no_cursor_replays_from_the_beginning():
+    """The first sync, and the fallback whenever a cursor is unavailable.
+    Passing None must fetch the Item's whole history, not nothing."""
     from adapters.plaid_source import PlaidSource
 
     client = _PagingClient([[_plaid_txn("t1", 1)]])
@@ -596,6 +596,44 @@ def test_the_cursor_is_still_not_applied_on_the_way_in():
     source.fetch_transactions()
 
     assert client.cursors_seen == [None]
+
+
+def test_a_stored_cursor_is_sent_on_the_first_request():
+    """5.8's behaviour change. Without this the adapter refetched the entire
+    Item on every sync -- correct, and increasingly expensive, and the reason
+    /transactions/sync issues a cursor at all."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient([[_plaid_txn("t1", 1)]])
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+    source.fetch_transactions("cursor-from-last-sync")
+
+    assert client.cursors_seen == ["cursor-from-last-sync"]
+
+
+def test_a_resumed_fetch_still_follows_pagination():
+    """Resuming and paginating are independent: a cursor that resumes into a
+    multi-page window must still walk to the end, or the sync silently keeps
+    only the first page of what changed."""
+    from adapters.plaid_source import PlaidSource
+
+    client = _PagingClient([[_plaid_txn("t1", 1)], [_plaid_txn("t2", 2)]])
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID, client=client)
+    result = source.fetch_transactions("resume-here")
+
+    assert client.cursors_seen == ["resume-here", "cursor-1"]
+    assert len(result.added) == 2
+
+
+def test_connection_names_the_item():
+    from adapters.plaid_source import PlaidSource
+    from core.models import ConnectionRef, Provider
+
+    source = PlaidSource(access_token="tok", item_id=ITEM_ID)
+
+    assert source.connection() == ConnectionRef(
+        provider=Provider.PLAID, connection_id=ITEM_ID
+    )
 
 
 def test_removals_across_pages_all_survive():

@@ -146,7 +146,7 @@ def render() -> str:
 @contextmanager
 def _seeded_database():
     from core import repository, store
-    from data_source import get_accounts, get_transactions
+    from data_source import get_accounts, get_all_transactions
 
     previous = os.environ.get("DB_PATH")
     with tempfile.TemporaryDirectory(prefix="baseline-db-") as tmp:
@@ -156,7 +156,7 @@ def _seeded_database():
             repository.save(
                 conn,
                 get_accounts(),
-                get_transactions(),
+                get_all_transactions(),
                 synced_at=BASELINE_SYNCED_AT,
             )
         finally:
@@ -186,10 +186,10 @@ def _txn_key(txn) -> str:
 def check_structure() -> list[str]:
     """Assertions the rendered text is blind to. Returns a list of failures."""
     from core.models import DEBT_TYPES
-    from data_source import get_accounts, get_transactions
+    from data_source import get_accounts, get_all_transactions
 
     accounts = get_accounts()
-    transactions = get_transactions()
+    transactions = get_all_transactions()
     failures: list[str] = []
 
     account_ids = {_account_key(a) for a in accounts}

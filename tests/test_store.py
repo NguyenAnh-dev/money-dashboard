@@ -23,6 +23,7 @@ from core import repository, store
 from core.models import (
     Account,
     AccountType,
+    ConnectionRef,
     Provider,
     SourceRef,
     Transaction,
@@ -94,13 +95,12 @@ def test_open_db_creates_both_tables_and_the_meta_row(db):
     tables = {r["name"] for r in db.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'"
     )}
-    assert {"accounts", "transactions", "meta"} <= tables
+    assert {"accounts", "transactions", "meta", "connections"} <= tables
 
     meta = db.execute("SELECT * FROM meta").fetchall()
     assert len(meta) == 1
     assert meta[0]["schema_version"] == store.SCHEMA_VERSION
     assert meta[0]["last_synced_at"] is None
-    assert meta[0]["sync_cursor"] is None
 
 
 def test_opening_an_existing_database_is_idempotent(tmp_path):
@@ -301,7 +301,6 @@ def test_every_model_field_survives_the_write(db):
     assert a["provider"] == "fake"
     assert a["provider_id"] == "acc_1"
     assert a["connection_id"] == "fixture"
-    assert a["fetched_at"] is None
     assert a["type"] == "checking"
     assert a["mask"] == "4321"
     assert a["available_cents"] == 99_000
@@ -328,19 +327,23 @@ def test_enums_are_stored_as_their_string_value(db):
     assert db.execute("SELECT kind FROM transactions").fetchone()["kind"] == "income"
 
 
-def test_fetched_at_is_stored_as_an_iso_datetime(db):
-    fetched = datetime(2026, 7, 27, 14, 3, 11)
-    ref = SourceRef(
-        provider=Provider.FAKE,
-        provider_id="acc_1",
-        connection_id="fixture",
-        fetched_at=fetched,
-    )
-    account = _account(source=ref, id=make_id(ref))
-    repository.save(db, [account], [])
+def test_fetched_at_lives_on_the_connection_not_on_every_row(db):
+    """5.8 moved it, which is where core/models.py always said it would go.
 
-    stored = db.execute("SELECT fetched_at FROM accounts").fetchone()
-    assert stored["fetched_at"] == "2026-07-27T14:03:11"
+    It is one value per FETCH and identical for every row of that fetch, so a
+    per-row column wrote the same timestamp 76 times and made a re-sync rewrite
+    every row in order to change one value.
+    """
+    columns = {r[1] for r in db.execute("PRAGMA table_info(accounts)")}
+    assert "fetched_at" not in columns
+
+    connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
+    repository.save(db, [_account()], [], connection=connection,
+                    synced_at=datetime(2026, 7, 27, 14, 3, 11))
+
+    assert repository.fetched_at_for(db, connection) == datetime(
+        2026, 7, 27, 14, 3, 11
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +399,267 @@ def test_an_upsert_refreshes_every_column_not_just_the_changed_one(db):
     assert t["merchant"] == "Blue Bottle Coffee"
     assert t["category"] == "Coffee"
     assert t["amount_cents"] == 625
+
+
+# ---------------------------------------------------------------------------
+# 5.8 item 3: deletion
+# ---------------------------------------------------------------------------
+
+def test_a_removed_id_deletes_the_row(db):
+    """HARD delete, not a superseded flag. The source is authoritative about
+    what it no longer has, and a ghost row would have to be filtered by
+    find_recurring, spending_by_category, the recent list and the count -- four
+    places to forget, each failing silently by counting money that is gone."""
+    account = _account()
+    txn = _transaction(account=account)
+    repository.save(db, [account], [txn])
+
+    result = repository.save(db, [account], [], removed=[txn.id])
+
+    assert result.deleted == 1
+    assert result.unmatched == ()
+    assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 0
+
+
+def test_a_removal_that_matches_nothing_is_reported_not_silent(db):
+    """THE guard, and what mapping ids into our space at 5.7 bought.
+
+    `DELETE FROM transactions WHERE id = ?` against an unmapped Plaid id
+    succeeds, reports success, and removes nothing. That is the failure mode
+    this counts rather than shrugs at.
+
+    It is REPORTED, not raised: a provider can legitimately withdraw a
+    transaction that arrived and vanished between two of our syncs, so aborting
+    would break a sync for a benign reason. A persistent count means the two
+    sides are minting ids differently.
+    """
+    account = _account()
+    repository.save(db, [account], [_transaction(account=account)])
+
+    result = repository.save(db, [account], [], removed=["plaid:item:never_seen"])
+
+    assert result.deleted == 0
+    assert result.unmatched == ("plaid:item:never_seen",)
+    assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 1
+
+
+def test_a_bare_provider_id_matches_nothing_and_says_so(db):
+    """The concrete bug the id mapping prevents: Plaid's raw transaction_id is
+    not our id, so handing it through unmapped deletes nothing at all."""
+    account = _account()
+    txn = _transaction(account=account)
+    repository.save(db, [account], [txn])
+
+    result = repository.save(db, [account], [], removed=[txn.source.provider_id])
+
+    assert result.deleted == 0
+    assert result.unmatched == (txn.source.provider_id,)
+    assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 1
+
+
+def test_deletion_happens_inside_the_same_transaction_as_the_write(db):
+    """A sync that fails after deleting would leave rows gone and nothing
+    written -- data loss with no error state to notice it by."""
+    account = _account()
+    txn = _transaction(account=account)
+    repository.save(db, [account], [txn])
+
+    orphan = _transaction(provider_id="orphan",
+                          account=_account(provider_id="does_not_exist"))
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.save(db, [account], [orphan], removed=[txn.id])
+
+    assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 1
+
+
+def test_deleting_nothing_is_a_no_op(db):
+    account = _account()
+    repository.save(db, [account], [_transaction(account=account)])
+
+    result = repository.save(db, [account], [], removed=[])
+
+    assert result.deleted == 0
+    assert result.unmatched == ()
+    assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 1
+
+
+def test_a_removal_list_longer_than_sqlites_variable_limit_works(db):
+    """SQLite caps host parameters per statement, so the existence check is
+    chunked. Without it a large withdrawal raises "too many SQL variables" --
+    and the sync it breaks is exactly the unusual one you would rather not have
+    to debug."""
+    account = _account()
+    txns = [_transaction(provider_id=f"txn_{i}", account=account)
+            for i in range(repository.DELETE_CHUNK * 2 + 7)]
+    repository.save(db, [account], txns)
+
+    result = repository.save(db, [account], [], removed=[t.id for t in txns])
+
+    assert result.deleted == len(txns)
+    assert result.unmatched == ()
+    assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 0
+
+
+def test_deletion_leaves_other_rows_alone(db):
+    account = _account()
+    keep = _transaction(provider_id="keep", account=account)
+    drop = _transaction(provider_id="drop", account=account)
+    repository.save(db, [account], [keep, drop])
+
+    repository.save(db, [account], [], removed=[drop.id])
+
+    remaining = [t.id for t in repository.load_transactions(db)]
+    assert remaining == [keep.id]
+
+
+def test_deleting_a_transaction_does_not_touch_its_account(db):
+    account = _account()
+    txn = _transaction(account=account)
+    repository.save(db, [account], [txn])
+
+    repository.save(db, [account], [], removed=[txn.id])
+
+    assert db.execute("SELECT COUNT(*) c FROM accounts").fetchone()["c"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 5.8 item 4: pending -> settled reconciliation
+# ---------------------------------------------------------------------------
+
+def _settled(account, replaces, provider_id="txn_settled", **kwargs):
+    return _transaction(
+        provider_id=provider_id,
+        account=account,
+        pending=False,
+        raw={"pending_transaction_id": replaces},
+        **kwargs,
+    )
+
+
+def test_a_settled_transaction_deletes_the_pending_row_it_replaces(db):
+    """Without this both rows persist and the charge is counted twice -- in the
+    spending total, in the transaction count, and potentially as two sides of a
+    recurring series."""
+    account = _account()
+    pending = _transaction(provider_id="txn_pending", account=account,
+                           pending=True)
+    repository.save(db, [account], [pending])
+
+    result = repository.save(db, [account],
+                             [_settled(account, "txn_pending")])
+
+    assert result.superseded == 1
+    remaining = repository.load_transactions(db)
+    assert len(remaining) == 1
+    assert remaining[0].pending is False
+
+
+def test_reconciliation_is_keyed_on_the_field_not_the_provider(db):
+    """Deliberately not `if provider is PLAID`. Any source that names the row
+    it replaces gets this behaviour, and a source that does not is unaffected --
+    which is why fake and CSV need no change at all: their ids survive
+    settlement, so the upsert already updates in place."""
+    account = _account()
+    pending = _transaction(provider_id="txn_pending", account=account,
+                           pending=True)
+    repository.save(db, [account], [pending])
+
+    settled = _settled(account, "txn_pending")
+    assert settled.source.provider is Provider.FAKE
+
+    assert repository.save(db, [account], [settled]).superseded == 1
+
+
+def test_the_replaced_id_is_mapped_into_our_id_space(db):
+    """`pending_transaction_id` is the PROVIDER's id. Deleting on it raw would
+    match nothing, silently, exactly as a bare id would for `removed`."""
+    account = _account()
+    settled = _settled(account, "txn_pending")
+
+    expected = make_id(SourceRef(
+        provider=Provider.FAKE,
+        provider_id="txn_pending",
+        connection_id="fixture",
+    ))
+    assert repository.superseded_id(settled) == expected
+    assert expected.startswith("fake:fixture:")
+
+
+def test_a_row_that_names_itself_is_not_deleted(db):
+    """A source whose id survives settlement would otherwise point at its own
+    row and delete what it just wrote."""
+    account = _account()
+    self_referencing = _transaction(
+        provider_id="txn_1", account=account,
+        raw={"pending_transaction_id": "txn_1"},
+    )
+
+    assert repository.superseded_id(self_referencing) is None
+
+    result = repository.save(db, [account], [self_referencing])
+    assert result.superseded == 0
+    assert len(repository.load_transactions(db)) == 1
+
+
+def test_a_missing_pending_twin_is_not_reported_as_unmatched(db):
+    """Unlike `removed`, this one is EXPECTED to miss regularly: a charge that
+    posts between two syncs is only ever seen settled, and its pending twin was
+    never stored. Reporting it would train everyone to ignore the warning that
+    matters."""
+    account = _account()
+
+    result = repository.save(db, [account],
+                             [_settled(account, "never_seen_pending")])
+
+    assert result.superseded == 0
+    assert result.unmatched == ()
+
+
+def test_a_null_pending_transaction_id_is_ignored(db):
+    """Plaid sends the key on every row and leaves it null on most -- all 48
+    rows of the recorded sandbox payload carry it, none set it."""
+    account = _account()
+    txn = _transaction(account=account,
+                       raw={"pending_transaction_id": None, "other": 1})
+
+    assert repository.superseded_id(txn) is None
+    assert repository.save(db, [account], [txn]).superseded == 0
+
+
+def test_an_absent_key_is_ignored(db):
+    account = _account()
+    assert repository.superseded_id(_transaction(account=account)) is None
+
+
+def test_both_halves_arriving_together_leave_only_the_settled_row(db):
+    """Deletion runs AFTER the upsert, so a payload carrying both the pending
+    row and its settled replacement resolves to one row rather than depending
+    on which was written first."""
+    account = _account()
+    pending = _transaction(provider_id="txn_pending", account=account,
+                           pending=True)
+    settled = _settled(account, "txn_pending")
+
+    result = repository.save(db, [account], [pending, settled])
+
+    remaining = repository.load_transactions(db)
+    assert result.superseded == 1
+    assert [t.id for t in remaining] == [settled.id]
+
+
+def test_reconciliation_rolls_back_with_the_rest_of_the_sync(db):
+    account = _account()
+    pending = _transaction(provider_id="txn_pending", account=account,
+                           pending=True)
+    repository.save(db, [account], [pending])
+
+    orphan = _transaction(provider_id="orphan",
+                          account=_account(provider_id="does_not_exist"))
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.save(db, [account],
+                        [_settled(account, "txn_pending"), orphan])
+
+    assert [t.id for t in repository.load_transactions(db)] == [pending.id]
 
 
 # ---------------------------------------------------------------------------
@@ -499,28 +763,59 @@ def test_save_stamps_last_synced_at(db):
     assert repository.last_synced_at(db) == "2026-07-28T11:30:15"
 
 
-def test_a_cursor_is_stored_when_the_source_supplies_one(db):
-    repository.save(db, [_account()], [], cursor="cursor-abc")
-    assert repository.sync_cursor(db) == "cursor-abc"
+def test_a_cursor_is_stored_per_connection(db):
+    connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
+    repository.save(db, [_account()], [], cursor="cursor-abc",
+                    connection=connection)
+
+    assert repository.cursor_for(db, connection) == "cursor-abc"
 
 
 def test_a_source_without_a_cursor_does_not_erase_the_stored_one(db):
-    """The reason `save` skips the UPDATE on None rather than writing NULL.
+    """COALESCE in the upsert, not a plain overwrite.
 
-    One meta row holds one cursor, so a `DATA_SOURCE=fake` sync into a database
-    that also holds Plaid rows would otherwise wipe Plaid's resume token -- and
-    the damage is invisible until the next Plaid sync silently refetches from
-    the beginning of time. The real fix is a per-connection cursor at 5.8; this
-    keeps the scaffolding from destroying data in the meantime.
+    A fetch that returns no cursor -- a failed page, an adapter that has none --
+    must not erase a working resume token, because the damage stays invisible
+    until the next sync silently refetches from the beginning of time.
     """
-    repository.save(db, [_account()], [], cursor="cursor-abc")
-    repository.save(db, [_account()], [], cursor=None)
+    connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
+    repository.save(db, [_account()], [], cursor="cursor-abc",
+                    connection=connection)
+    repository.save(db, [_account()], [], cursor=None, connection=connection)
 
-    assert repository.sync_cursor(db) == "cursor-abc"
+    assert repository.cursor_for(db, connection) == "cursor-abc"
 
 
 def test_a_new_database_has_no_cursor(db):
-    assert repository.sync_cursor(db) is None
+    connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
+    assert repository.cursor_for(db, connection) is None
+
+
+def test_two_connections_keep_separate_cursors(db):
+    """THE 5.7 scaffolding problem, fixed. One column in a one-row meta
+    table gave two Plaid Items a single slot, so syncing either would resume the
+    other from the wrong point -- silently skipping transactions."""
+    first = ConnectionRef(provider=Provider.PLAID, connection_id="item_1")
+    second = ConnectionRef(provider=Provider.PLAID, connection_id="item_2")
+
+    repository.save_connection(db, first, cursor="cursor-1")
+    repository.save_connection(db, second, cursor="cursor-2")
+    db.commit()
+
+    assert repository.cursor_for(db, first) == "cursor-1"
+    assert repository.cursor_for(db, second) == "cursor-2"
+
+
+def test_a_fake_sync_cannot_clobber_a_plaid_cursor(db):
+    """The concrete damage the shared slot could do: DATA_SOURCE=fake
+    into a database that also holds Plaid rows."""
+    plaid = ConnectionRef(provider=Provider.PLAID, connection_id="item_1")
+    fake = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
+
+    repository.save_connection(db, plaid, cursor="plaid-cursor")
+    repository.save(db, [_account()], [], connection=fake)
+
+    assert repository.cursor_for(db, plaid) == "plaid-cursor"
 
 
 def test_save_defaults_the_stamp_to_now(db):
@@ -625,19 +920,23 @@ def test_enums_come_back_as_enum_members(db):
     assert restored.source.provider is Provider.FAKE
 
 
-def test_source_ref_is_reassembled_from_its_four_columns(db):
-    fetched = datetime(2026, 7, 27, 14, 3, 11)
-    ref = SourceRef(
-        provider=Provider.FAKE,
-        provider_id="acc_1",
-        connection_id="fixture",
-        fetched_at=fetched,
-    )
-    repository.save(db, [_account(source=ref, id=make_id(ref))], [])
+def test_source_ref_is_reassembled_from_its_columns_plus_the_connection(db):
+    """Three columns on the row, the fourth from `connections`.
+
+    This is the one thing 5.8 stopped round-tripping, and deliberately: an
+    Account minted with fetched_at=None comes back carrying the CONNECTION's
+    fetch time, because that is what the field actually means -- when this data
+    was fetched, not a property of the row.
+    """
+    connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
+    repository.save(db, [_account()], [], connection=connection,
+                    synced_at=datetime(2026, 7, 27, 14, 3, 11))
 
     restored = repository.load_accounts(db)[0].source
-    assert restored == ref
-    assert restored.fetched_at == fetched
+    assert restored.provider is Provider.FAKE
+    assert restored.provider_id == "acc_1"
+    assert restored.connection_id == "fixture"
+    assert restored.fetched_at == datetime(2026, 7, 27, 14, 3, 11)
 
 
 def test_a_null_fetched_at_comes_back_as_none_not_a_string(db):

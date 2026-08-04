@@ -41,7 +41,7 @@ from pathlib import Path
 #: first INSERT naming a column that is not there -- or worse, succeed against
 #: a table missing a CHECK we now depend on. The version is the thing that
 #: notices, and it notices at open time rather than mid-sync.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -79,15 +79,21 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- merge "aBc123" and "abc123" into one surviving row.
     id                TEXT PRIMARY KEY NOT NULL,
 
-    -- SourceRef, flattened into four columns rather than stored as JSON.
+    -- SourceRef, flattened into three columns rather than stored as JSON.
     -- provider and connection_id are technically recoverable from `id`, and we
     -- store them anyway: the rule is NEVER PARSE AN ID, and "everything from
     -- this connection" has to be a WHERE clause rather than a LIKE on a prefix
     -- that breaks the moment a segment contains an escaped %3A.
+    --
+    -- `fetched_at` is the FOURTH field of SourceRef and is deliberately NOT
+    -- here: it changes on every sync and is identical for every row of one
+    -- fetch, so storing it per row wrote the same timestamp 76 times and made
+    -- a re-sync rewrite every row to change one value. It lives in
+    -- `connections` (5.8), which is where core/models.py always said it would
+    -- end up.
     provider          TEXT NOT NULL,
     provider_id       TEXT NOT NULL,
     connection_id     TEXT NOT NULL,
-    fetched_at        TEXT,
 
     name              TEXT NOT NULL,
     institution       TEXT NOT NULL,
@@ -130,7 +136,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     provider          TEXT NOT NULL,
     provider_id       TEXT NOT NULL,
     connection_id     TEXT NOT NULL,
-    fetched_at        TEXT,
 
     -- OUR account id, never the provider's. This FK is the STRUCTURE gate's
     -- "every account_id resolves" check moved into the schema, where it holds
@@ -178,20 +183,32 @@ CREATE TABLE IF NOT EXISTS meta (
     -- NULL until the first sync, and that is the honest state rather than a
     -- placeholder: a database that has been created but never synced has no
     -- "last synced" time, and 0 or "" would both read as a real answer.
-    last_synced_at  TEXT,
+    last_synced_at  TEXT
+);
 
-    -- The provider's resume token (Plaid's next_cursor). NULL for sources that
-    -- have no such concept, which is every source except Plaid.
-    --
-    -- ONE COLUMN IN A ONE-ROW TABLE IS THE WRONG HOME FOR THIS, and it is
-    -- deliberate scaffolding rather than a design. A cursor belongs to a
-    -- CONNECTION -- one Plaid Item -- so a database holding two Items has two
-    -- cursors and exactly one slot to put them in. Today nothing can hit that:
-    -- one adapter is held per sync and only Plaid produces a cursor at all.
-    -- Step 5.8 makes syncs incremental, which is the point where resuming from
-    -- the wrong Item's cursor would silently skip transactions, so the column
-    -- moves to a per-connection row there.
-    sync_cursor     TEXT
+-- One row per linked source: one Plaid Item, one CSV import batch, one
+-- enrollment. The home the 5.7 scaffolding was explicitly waiting for.
+--
+-- KEYED ON (provider, connection_id), NOT on a surrogate id. That pair IS the
+-- identity -- it is the first two segments of every id the connection mints --
+-- so a synthetic key would be a second name for a thing that already has one,
+-- plus a lookup to translate between them.
+CREATE TABLE IF NOT EXISTS connections (
+    provider        TEXT NOT NULL,
+    connection_id   TEXT NOT NULL,
+
+    -- The provider's resume token. NULL for a source with no such concept,
+    -- which is every source except Plaid, and NULL for a Plaid connection that
+    -- has never synced. Both mean "start from the beginning", which is the
+    -- correct and safe reading.
+    cursor          TEXT,
+
+    -- SourceRef.fetched_at, at last. One value per fetch, stored once.
+    fetched_at      TEXT,
+
+    PRIMARY KEY (provider, connection_id),
+    CHECK (provider IN ('fake', 'plaid', 'csv')),
+    CHECK (length(connection_id) > 0)
 );
 
 -- Each index exists for a query we already know we make.
@@ -265,8 +282,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # file that already had rows; changing that number is a migration's job.
     if is_new:
         conn.execute(
-            "INSERT INTO meta (id, schema_version, last_synced_at, sync_cursor) "
-            "VALUES (1, ?, NULL, NULL)",
+            "INSERT INTO meta (id, schema_version, last_synced_at) "
+            "VALUES (1, ?, NULL)",
             (SCHEMA_VERSION,),
         )
     conn.commit()

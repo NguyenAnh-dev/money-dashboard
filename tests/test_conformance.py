@@ -65,6 +65,7 @@ from adapters.plaid_source import (                # noqa: E402
 from core.models import (                          # noqa: E402
     DEBT_TYPES,
     AccountType,
+    ConnectionRef,
     Provider,
     SourceRef,
     SyncResult,
@@ -124,7 +125,11 @@ class RecordedPlaidSource:
         return [to_account(raw, self.ITEM_ID)
                 for raw in self._payload["accounts"]]
 
-    def fetch_transactions(self):
+    def connection(self):
+        return ConnectionRef(provider=Provider.PLAID,
+                             connection_id=self.ITEM_ID)
+
+    def fetch_transactions(self, cursor=None):
         return SyncResult(added=[to_transaction(raw, self.ITEM_ID)
                                  for raw in self._payload["transactions"]])
 
@@ -203,6 +208,59 @@ def test_fetch_transactions_returns_a_sync_result(source):
     assert result.added or result.modified, (
         f"{_source_name(source)} returned no transactions"
     )
+
+
+@parametrized
+def test_connection_identifies_the_source_before_it_fetches(source):
+    """5.8 added `connection()` to the contract, and the ordering is the reason.
+
+    A cursor is stored per (provider, connection_id), so sync.py has to know
+    which connection it is about to fetch BEFORE it fetches -- otherwise there
+    is no key to look the cursor up under. Deriving it from the returned records
+    is too late, and deriving it from DATA_SOURCE would name the provider but
+    never the Item.
+    """
+    connection = source.connection()
+
+    assert isinstance(connection, ConnectionRef)
+    assert isinstance(connection.provider, Provider)
+    assert connection.connection_id
+
+
+@parametrized
+def test_connection_matches_the_provenance_of_every_record(source):
+    """The connection a source NAMES and the connection its records CLAIM must
+    be the same one. If they drift, the cursor is filed under a key nothing
+    reads back, so every sync silently refetches from the beginning."""
+    connection = source.connection()
+
+    for record in [*source.fetch_accounts(), *_transactions(source)]:
+        assert record.source.provider is connection.provider
+        assert record.source.connection_id == connection.connection_id
+
+
+@parametrized
+def test_connection_is_stable_across_calls(source):
+    """A connection identity that changed between calls would file each sync's
+    cursor under a fresh key, which reads exactly like never having synced."""
+    assert source.connection() == source.connection()
+
+
+@parametrized
+def test_a_cursorless_source_ignores_a_cursor_it_is_given(source):
+    """`fetch_transactions(cursor)` is on the contract for every adapter, but
+    only Plaid can resume. Fake and CSV must return complete current state
+    regardless of what they are handed -- silently returning nothing because a
+    caller passed a token they do not understand would look exactly like a
+    source with no new data.
+    """
+    if source.fetch_transactions().cursor is not None:
+        pytest.skip("source has real cursors; resuming is tested per-adapter")
+
+    without = [t.id for t in _transactions(source)]
+    result = source.fetch_transactions("a-cursor-from-somewhere-else")
+
+    assert [t.id for t in [*result.added, *result.modified]] == without
 
 
 @parametrized

@@ -25,6 +25,7 @@ from core import repository, store
 from core.models import (
     Account,
     AccountType,
+    ConnectionRef,
     Provider,
     SourceRef,
     SyncResult,
@@ -251,11 +252,14 @@ def test_sync_fetches_transactions_before_accounts(tmp_path, monkeypatch):
     calls = []
 
     class Recording:
+        def connection(self):
+            return ConnectionRef(provider=Provider.FAKE, connection_id="rec")
+
         def fetch_accounts(self):
             calls.append("accounts")
             return []
 
-        def fetch_transactions(self):
+        def fetch_transactions(self, cursor=None):
             calls.append("transactions")
             return SyncResult()
 

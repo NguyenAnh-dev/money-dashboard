@@ -47,6 +47,7 @@ from core.models import (
     Account,
     AccountType,
     Provider,
+    ConnectionRef,
     SourceRef,
     SyncResult,
     Transaction,
@@ -634,7 +635,7 @@ class PlaidSource:
         one and then skip cleanly when credentials are absent.
 
         THE CACHE ONLY HELPS A LONG-LIVED INSTANCE. `data_source.get_accounts()`
-        and `get_transactions()` each construct a new adapter, so a caller going
+        and `get_all_transactions()` each construct a new adapter, so a caller going
         through them resolves this once per fetch and never carries it over.
         `data_source.get_source()` exists so sync.py can hold one instance and
         get the cache; `from_env()` still refuses to build without
@@ -663,7 +664,12 @@ class PlaidSource:
         return [to_account(account.to_dict(), item_id)
                 for account in response["accounts"]]
 
-    def fetch_transactions(self) -> SyncResult:
+    def connection(self) -> ConnectionRef:
+        return ConnectionRef(
+            provider=PROVIDER, connection_id=self._connection_id()
+        )
+
+    def fetch_transactions(self, cursor: str | None = None) -> SyncResult:
         """Every change /transactions/sync reports, plus the cursor to resume at.
 
         `has_more` is the ONLY correct stop condition. An empty page is not the
@@ -674,16 +680,19 @@ class PlaidSource:
         hand back, so `test_two_fetches_produce_identical_ids` compares a
         stable order rather than whatever order the pages happened to arrive in.
 
-        THE CURSOR IS RETURNED, NOT APPLIED. This still starts from no cursor on
-        every call, so it still fetches everything -- 5.7 is plumbing, and a
-        render diff would mean it was not. Resuming from a stored cursor is 5.8,
-        and it is a behaviour change with its own failure modes: a cursor that
-        resumes too far forward silently skips transactions.
+        THE CURSOR IS NOW APPLIED (5.8). Passing one resumes from that point, so
+        a second sync returns only what changed since; passing None replays
+        everything from the beginning of the Item's history.
+
+        Note what that means for the return value: `added` is no longer "every
+        transaction", it is "every transaction NEW TO US". A caller that treats
+        it as a complete statement gets a fragment -- which is exactly why
+        data_source.get_all_transactions() passes no cursor and sync.py does.
         """
         from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
         item_id = self._connection_id()
-        added, modified, removed, cursor = [], [], [], None
+        added, modified, removed = [], [], []
         while True:
             # Cursor passed to the CONSTRUCTOR, not assigned afterwards.
             # Post-construction assignment does work on plaid-python 42 (these

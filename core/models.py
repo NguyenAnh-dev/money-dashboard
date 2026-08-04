@@ -234,6 +234,20 @@ class Transaction:
 
 
 @dataclass(frozen=True)
+class ConnectionRef:
+    provider: Provider
+    connection_id: str
+
+    def __post_init__(self) -> None:
+        if not self.connection_id:
+            raise ValueError(
+                "connection_id must not be empty -- it is half the key a "
+                "cursor is stored under, and a blank one would collide with "
+                "every other blank"
+            )
+
+
+@dataclass(frozen=True)
 class SyncResult:
     added: list[Transaction] = field(default_factory=list)
     modified: list[Transaction] = field(default_factory=list)

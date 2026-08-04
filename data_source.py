@@ -5,7 +5,7 @@ The SELECTOR. It used to BE the data; now it only decides where data comes
 from and hands back what the adapter produced.
 
 Everything above this line -- main.py, insights.py -- still imports
-`get_accounts`, `get_transactions`, and `dollars` from here and did not change
+`get_accounts`, `get_all_transactions`, and `dollars` from here and did not change
 by one character when the fixture moved into adapters/fake.py. That is the
 payoff of building inside-out: the seam was already in the right place, so
 swapping the implementation behind it is a no-op for every caller.
@@ -100,9 +100,20 @@ def get_accounts() -> list[Account]:
     return get_source().fetch_accounts()
 
 
-def get_transactions() -> list[Transaction]:
-    """Transactions from the configured source, as core.models.Transaction."""
-    result = get_source().fetch_transactions()
+def get_all_transactions() -> list[Transaction]:
+    """EVERY transaction the source has, as core.models.Transaction.
+
+    Named for the guarantee, since 5.8 made it possible to get less. A source
+    handed a cursor returns only what changed, and `SyncResult.added` then means
+    "new to us" rather than "everything" -- so a caller wanting a complete
+    statement has to say so. `cursor=None` is passed explicitly for the same
+    reason: a full replay here is a decision, not the shape of the default.
+
+    This is the convenience path. sync.py deliberately does not use it -- it
+    holds one source, resumes from the stored cursor, and needs `removed` and
+    the new cursor, all three of which this function drops on the floor.
+    """
+    result = get_source().fetch_transactions(cursor=None)
     return [*result.added, *result.modified]
 
 

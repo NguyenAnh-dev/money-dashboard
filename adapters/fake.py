@@ -34,6 +34,7 @@ from core.models import (
     Account,
     AccountType,
     Provider,
+    ConnectionRef,
     SourceRef,
     SyncResult,
     Transaction,
@@ -131,7 +132,10 @@ class FakeSource:
             for provider_id, name, institution, account_type, balance_cents in rows
         ]
 
-    def fetch_transactions(self) -> SyncResult:
+    def connection(self) -> ConnectionRef:
+        return ConnectionRef(provider=PROVIDER, connection_id=CONNECTION_ID)
+
+    def fetch_transactions(self, cursor: str | None = None) -> SyncResult:
         """Fake transactions spanning May-July 2026, shaped like a real statement.
 
         WHAT MY STEP-3 DETECTOR SHOULD DO (true recurring):
