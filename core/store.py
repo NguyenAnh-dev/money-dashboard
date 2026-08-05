@@ -41,7 +41,7 @@ from pathlib import Path
 #: first INSERT naming a column that is not there -- or worse, succeed against
 #: a table missing a CHECK we now depend on. The version is the thing that
 #: notices, and it notices at open time rather than mid-sync.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -73,6 +73,30 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #: work in the app and quietly do nothing in a `sqlite3` shell or a DB browser.
 #: Conversion happens in one explicit place at 5.4 instead.
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id              TEXT PRIMARY KEY NOT NULL,
+    email           TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+
+    CHECK (length(id) = 36),
+    CHECK (length(email) > 0 AND email = lower(email)),
+    CHECK (length(password_hash) > 0),
+    CHECK (length(created_at) = 19)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash      TEXT PRIMARY KEY NOT NULL,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at      TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+
+    CHECK (length(token_hash) = 64),
+    CHECK (length(created_at) = 19),
+    CHECK (length(expires_at) = 19),
+    CHECK (expires_at > created_at)
+);
+
 CREATE TABLE IF NOT EXISTS accounts (
     -- make_id(): "provider:connection_id:provider_id". Plain TEXT PRIMARY KEY
     -- is already case-sensitive in SQLite; never add COLLATE NOCASE, it would
@@ -114,7 +138,10 @@ CREATE TABLE IF NOT EXISTS accounts (
     CHECK (available_cents IS NULL OR typeof(available_cents) = 'integer'),
     CHECK (length(currency) = 3 AND currency = upper(currency)),
     CHECK (provider IN ('fake', 'plaid', 'csv')),
-    CHECK (type IN ('checking', 'savings', 'credit', 'investment', 'loan', 'other'))
+    CHECK (type IN ('checking', 'savings', 'credit', 'investment', 'loan', 'other')),
+
+    FOREIGN KEY (provider, connection_id)
+        REFERENCES connections(provider, connection_id)
 
     -- DELIBERATELY ABSENT: a CHECK that debt accounts are non-positive.
     --
@@ -170,7 +197,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     CHECK (pending IN (0, 1)),
     -- A date, never a datetime. "2026-07-27T00:00:00" would sort fine and then
     -- break every equality comparison against a bare date.
-    CHECK (date = substr(date, 1, 10) AND length(date) = 10)
+    CHECK (date = substr(date, 1, 10) AND length(date) = 10),
+
+    FOREIGN KEY (provider, connection_id)
+        REFERENCES connections(provider, connection_id)
 );
 
 -- One row, and the CHECK is what keeps it that way: a second row would make
@@ -196,6 +226,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS connections (
     provider        TEXT NOT NULL,
     connection_id   TEXT NOT NULL,
+    user_id         TEXT NOT NULL REFERENCES users(id),
 
     -- The provider's resume token. NULL for a source with no such concept,
     -- which is every source except Plaid, and NULL for a Plaid connection that
@@ -217,6 +248,9 @@ CREATE INDEX IF NOT EXISTS idx_txn_date        ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_txn_merchant    ON transactions(merchant);
 CREATE INDEX IF NOT EXISTS idx_txn_connection  ON transactions(provider, connection_id);
 CREATE INDEX IF NOT EXISTS idx_acct_connection ON accounts(provider, connection_id);
+CREATE INDEX IF NOT EXISTS idx_conn_user       ON connections(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user   ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
 """
 
 

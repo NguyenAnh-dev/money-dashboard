@@ -107,10 +107,10 @@ Data flows strictly one direction, and the layering is the point:
       ↓                                         ↓
 adapters/*  →  core/models  →  core/repository  →  SQLite  →  core/repository
 (translate)    (vocabulary)    (model → row)      (money.db)   (row → model)
-                    ↑                                              │
-              data_source.py                                       ↓
-              (selector, DATA_SOURCE per call)              insights.py → main.py
-                                                            (analysis)    (rendering)
+                    ↑                     ↑                        │
+              data_source.py         core/users.py                 ↓
+              (selector, DATA_SOURCE  (who owns it)         insights.py → main.py
+               per call)                                    (analysis)    (rendering)
 ```
 
 **`sync.py` fetches transactions BEFORE accounts, and that is not a slip.** Two fetches are
@@ -225,6 +225,51 @@ conventions*.
   `find_recurring`, where the provisional amount would fabricate a price change), while a
   transfer is a final amount that was never spending at all. Opposite reasons, so neither
   skip is precedent for the other.
+- **`core/users.py`** — who owns the data (6.1). Mints user ids (**UUIDv4, canonical
+  lowercase text**, minted by the app because SQLite has no `uuid()`), normalizes emails,
+  and holds the single-user scaffolding: `LOCAL_USER_ID`, a **fixed** constant rather than
+  a per-process `uuid4()` — a new id each run would file every sync under a new owner while
+  `main.py`, which looks rows up by the constant, reported "No data yet" against a full
+  database. Its `password_hash` is `UNUSABLE_PASSWORD_HASH = "!"`, the Unix convention for
+  a disabled password and a string no hash function produces, so the row cannot be
+  authenticated against once a verifier exists. `sync.py` calls `ensure_local_user`;
+  `main.py` only *reads* the constant, because creating a user as a side effect of a
+  read-only command is the same mistake as creating an empty `money.db`. See
+  `docs/USERS.md`.
+  **6.2 added signup and login here.** `create_user(conn, email, password)` hashes through
+  `core/passwords.py` and raises **`EmailAlreadyRegistered`** rather than letting a raw
+  `sqlite3.IntegrityError` reach an HTTP handler — matched narrowly on `"users.email"`, so a
+  malformed id or a constraint added later still reports its own cause.
+  `create_user_with_hash` is the same write taking a ready-made hash: it is how the local
+  user gets `"!"`, a value `hash_password` would never produce, and how tests that are not
+  about hashing avoid paying ~50 ms a user.
+  **`authenticate` runs a throwaway verification when the email is unknown**, and that is
+  not decoration. argon2 is slow by design, so an early return makes an unknown email tens
+  of milliseconds faster than a known one with a wrong password — an oracle for *is this
+  person a customer of yours*. A row with an unusable hash wastes one too (otherwise
+  "disabled" is distinguishable from "absent"), and a successful lookup does **not** pay
+  twice, which would be the same signal reversed. Pinned by **counting** the calls, never by
+  timing them.
+- **`core/passwords.py`** — the KDF, and the only module that imports `argon2` (6.2).
+  **Never `hashlib`**: a general-purpose digest is built to be fast, which is the one
+  property a password hash must not have. `verify_password` returns `False` rather than
+  raising, because argon2 raises `InvalidHashError` on anything it cannot parse — including
+  the local user's `"!"` — and letting that propagate turns a disabled account into a 500
+  instead of a failed login. **The `argon2` import is lazy** (`passwords.hasher()`), for the
+  reason `requirements.txt` gives about the Plaid SDK: `main.py` reaches `core.users` for
+  one constant, and a C extension has no business being loaded to render a table.
+  `test_rendering_does_not_import_argon2` pins it in a **subprocess**, since argon2 is
+  already imported in the test process.
+- **`core/sessions.py`** — server-side session tokens (6.2), deliberately not JWTs: a JWT
+  is valid until it expires no matter what the server thinks, so logout degrades to "the
+  client agreed to forget it" and "sign me out everywhere" is inexpressible. **The table
+  stores a SHA-256 of the token, never the token** — a session token is a bearer credential,
+  so a leaked database would otherwise hand over every live session directly, and rotating
+  passwords would not help. A fast hash is correct here precisely because a password hash
+  must be slow: 32 random bytes have no dictionary to run against them. Expiry is checked on
+  **read** (`<=`, so an expiry of exactly now has expired); `purge_expired` is separate
+  because a resolver that deleted on read would make every page load a write. See
+  `docs/AUTH.md`.
 - **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
   through as an argument so the gate can pin it by passing a `Console`, not by patching a
   global.
@@ -327,11 +372,54 @@ Treat this as a known ceiling on CSV id stability, not a bug to solve in the min
 real fix is upstream: a source that supplies its own ids (Plaid does) never reaches this
 code path.
 
+### Users and scoping (6.1, schema v4)
+
+**`user_id` appears exactly once in the schema, on `connections`.** Not on `accounts`, not
+on `transactions` — those belong to a connection and a connection belongs to a user, so the
+chain carries the answer. Copying it onto every row would write one value 76 times per sync
+and then need keeping consistent with the connection it came from: the same denormalization
+`fetched_at` was moved *out* of those tables to stop at 5.8.
+
+**The chain is a foreign key, and that was not optional.** `accounts` and `transactions`
+both gained `FOREIGN KEY (provider, connection_id) REFERENCES connections(...)`. Every read
+now joins through `connections` to filter, so an account whose connection row is missing
+joins to nothing and **vanishes from the dashboard while sitting in the file** — no error,
+a net worth quietly missing a bank. Before 6.1 nothing joined, so a missing row cost
+nothing; the join is what makes it silent data loss, and the FK is what makes it impossible.
+`save` writes connections **first** for exactly the reason it writes accounts before
+transactions, and derives them from the records' own `SourceRef` so no call site can orphan
+an account by omitting the optional `ConnectionRef`.
+
+**Every repository function takes `user_id` as a required positional argument** —
+`load_transactions(conn, user_id)`, `save(conn, user_id, accounts, transactions)`. No
+default, and the two defaults that were rejected are why: `LOCAL_USER_ID` would make a
+forgotten argument work perfectly until there are two users and then return the wrong
+person's money, and `None` meaning "everything" would make it a silent full-table read.
+Required makes both an immediate `TypeError`. **Deletes are scoped by the same join**, which
+is load-bearing rather than tidy: `DELETE ... WHERE id = ?` needs only an id, and an id
+carries no user segment, so unscoped it would delete another user's row and report success.
+`repository.last_synced_at` is the one function deliberately left unscoped — `meta` is
+global, and a parameter it ignored would claim filtering that does not happen.
+
+**A connection belongs to exactly one user, and the PK stays `(provider, connection_id)`.**
+An id is `provider:connection_id:provider_id` with **no user segment**, so two users holding
+one `connection_id` would mint *identical* account ids and the second sync's upsert would
+overwrite the first user's rows — doing exactly what an upsert is for, on somebody else's
+data. Putting `user_id` in the key would permit that arrangement while leaving the collision
+intact one table over. `ensure_connections` raises instead. **The live consequence: a second
+user cannot sync the fake source**, since `CONNECTION_ID` is the constant `"fixture"` for
+everybody. That is the id namespace correctly reporting that it is not yet multi-user, not a
+bug in the fixture.
+
 ## Project conventions
 
 - This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 were
   **diff-free refactors** — they moved code and had to leave the render byte-identical.
-  Step 5 introduces SQLite, which is why id stability matters now.
+  Step 5 introduces SQLite, which is why id stability matters now. Step 6 introduces users.
+- **Schema v5** as of 6.2 (`sessions`); v4 was 6.1 (`users`). There is still no migration
+  path — an older database is refused with "delete the file and re-sync", in both
+  directions. Five versions in five steps is fine while the database is disposable; it stops
+  being fine the day it holds something a re-sync cannot rebuild.
 - **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`).
   It was hardcoded through 4.5 so those refactors stayed diff-free; the pin expired at 4.7,
   when a Plaid render put real balances on screen under the word "fake". That is the failure
@@ -387,6 +475,25 @@ code path.
   `repository.superseded_id` deletes it in the same transaction. Keyed on the field, not on
   the provider. Still unsolvable from a CSV, where the information was never exported — see
   the reconciliation entry under **Open questions**.
+- **Authentication exists as of 6.2, but nothing is behind it.** Signup, login and sessions
+  are functions with no caller: `sync.py` and `main.py` are CLI commands with no session and
+  no way to prompt for one, so they still use `LOCAL_USER_ID` and ignore all of it. That is
+  what 6.3's HTTP surface is for, and 6.1's plumbing is what makes swapping it a one-line
+  change per call site. Also still missing, all of it deliberately waiting for a request to
+  attach to: **rate limiting and lockout** (argon2 makes one guess expensive, not a million
+  impossible), **cookie/CSRF decisions**, **password reset and email verification** (both
+  need a mail path this project does not have), and **`needs_rehash` is implemented and
+  never called** — re-hashing needs the plaintext, which exists only during a login, so it
+  belongs with the endpoint that has a response to write it in.
+- **The id namespace is not multi-user**, and this is the one to resolve before two users
+  ever coexist for real. `make_id` has no user segment, so multi-user needs either
+  connection ids minted per user (a Plaid Item id already is; only sources that hardcode one
+  are a problem) or a segment added to `make_id` — which **rekeys every row ever minted**
+  and is a far larger decision than it looks. See `docs/USERS.md` §6.
+- **`meta.last_synced_at` is global, not per user.** The honest per-user answer is
+  `MAX(connections.fetched_at)` for that user, which is already stored — wiring the footer
+  to it is a render change with its own baseline diff, so it is deferred rather than
+  overlooked.
 - **`Account.institution` is hardcoded to `"Plaid"`** for every Plaid account, so a Plaid
   render reports "3 institutions" as 1 and the net-worth panel's "across all banks" is
   aspirational. The real name needs a second API call (`/institutions/get_by_id` off
@@ -402,6 +509,31 @@ code path.
   Amex payment would be reported as a subscription without it, and
   `test_no_transfer_ever_reaches_the_recurring_table` states that over the detector's
   output rather than by re-checking the `continue`.
+- **A pending charge that differs from its settled history should raise an alert, and does
+  not yet.** The trigger: a pending charge from a merchant `find_recurring` already
+  identified, whose amount differs from that merchant's most recent settled charge. Any
+  direction — a subscription that quietly dropped is as worth knowing as one that rose.
+
+  **The guard is the whole feature**: fire only when the last **three** settled charges are
+  identical. Without it the alert lands on merchants that vary by design — the fixture's
+  T-Mobile bill, a card payment that is a different number every month — and an alert that
+  fires constantly is one people stop reading. A merchant with no settled history is
+  skipped rather than guessed at; there is nothing to compare against.
+
+  **Derived, never stored.** Computed fresh on every render from the pending rows plus
+  settled history, which is what keeps it free of lifecycle bugs: when the charge settles,
+  5.8's reconciliation deletes the pending row and the alert disappears with it — no
+  cleanup path to write and no stale alert to expire. If it settled at the new amount,
+  `find_recurring` reports it as a real price change on the next run, through the existing
+  `previous_cents` path.
+
+  Deferred because it is three things at once, none of them free: detection logic that
+  belongs beside `find_recurring`, a render diff, and a decision about where on the screen
+  it appears. It is also **untestable end to end against the Plaid sandbox, which has no
+  pending transactions at all** — building it means first adding a deliberate pending
+  charge to the fake fixture whose amount differs from its settled history. Note that
+  fixture does not have one today: its only pending row is the Starbucks, which
+  `find_recurring` rejects anyway (see the `pending` skip entry above).
 - **Plaid's `LOAN_PAYMENTS → TRANSFER` is a judgment call, and the one mapping that will
   get a bug report.** The visible symptom, stated up front because someone will ask: **a
   mortgage or car payment disappears from Spending by Category.** That is intended.
@@ -472,3 +604,8 @@ code path.
   along the same seam as the modules themselves (`store` owns the file, `repository` owns
   the row↔model translation), not along "5.3 tests" and "5.4 tests". A judgment call for
   5.5, not a fix owed now.
+  **6.1 added `tests/test_users.py` rather than growing that file further**, and the seam is
+  the same one: it holds what is true of *users and scoping* — what a user id is, and that
+  every query filters by one — which is a question about ownership rather than about the
+  file or the row translation. `tests/test_store.py` gained only a seeded local user in its
+  `db` fixture and the `USER` argument at every call site.

@@ -132,14 +132,52 @@ ACCOUNT_UPSERT = _upsert_sql("accounts", ACCOUNT_COLUMNS)
 TRANSACTION_UPSERT = _upsert_sql("transactions", TRANSACTION_COLUMNS)
 
 
-def save_accounts(conn: sqlite3.Connection, accounts: Sequence[Account]) -> int:
+def connection_pairs(records: Sequence[Account | Transaction]) -> set[tuple[str, str]]:
+    return {
+        (r.source.provider.value, r.source.connection_id) for r in records
+    }
+
+
+def ensure_connections(
+    conn: sqlite3.Connection,
+    user_id: str,
+    pairs: set[tuple[str, str]],
+) -> None:
+    for provider, connection_id in sorted(pairs):
+        row = conn.execute(
+            "SELECT user_id FROM connections "
+            "WHERE provider = ? AND connection_id = ?",
+            (provider, connection_id),
+        ).fetchone()
+
+        if row is None:
+            conn.execute(
+                "INSERT INTO connections (provider, connection_id, user_id) "
+                "VALUES (?, ?, ?)",
+                (provider, connection_id, user_id),
+            )
+        elif row["user_id"] != user_id:
+            raise ValueError(
+                f"connection {provider}:{connection_id} belongs to user "
+                f"{row['user_id']}, not {user_id}. Every id this connection "
+                f"mints is namespaced on that pair and carries no user "
+                f"segment, so writing it under a second user would overwrite "
+                f"the first user's rows rather than sit beside them."
+            )
+
+
+def save_accounts(
+    conn: sqlite3.Connection, user_id: str, accounts: Sequence[Account]
+) -> int:
+    ensure_connections(conn, user_id, connection_pairs(accounts))
     conn.executemany(ACCOUNT_UPSERT, [account_row(a) for a in accounts])
     return len(accounts)
 
 
 def save_transactions(
-    conn: sqlite3.Connection, transactions: Sequence[Transaction]
+    conn: sqlite3.Connection, user_id: str, transactions: Sequence[Transaction]
 ) -> int:
+    ensure_connections(conn, user_id, connection_pairs(transactions))
     conn.executemany(
         TRANSACTION_UPSERT, [transaction_row(t) for t in transactions]
     )
@@ -147,7 +185,7 @@ def save_transactions(
 
 
 def delete_transactions(
-    conn: sqlite3.Connection, ids: Sequence[str]
+    conn: sqlite3.Connection, user_id: str, ids: Sequence[str]
 ) -> DeleteResult:
     ids = list(ids)
     if not ids:
@@ -159,13 +197,17 @@ def delete_transactions(
         placeholders = ", ".join("?" for _ in chunk)
         present.update(
             row["id"] for row in conn.execute(
-                f"SELECT id FROM transactions WHERE id IN ({placeholders})",
-                chunk,
+                f"SELECT t.id FROM transactions t "
+                f"JOIN connections c "
+                f"  ON c.provider = t.provider "
+                f" AND c.connection_id = t.connection_id "
+                f"WHERE c.user_id = ? AND t.id IN ({placeholders})",
+                (user_id, *chunk),
             )
         )
 
     conn.executemany(
-        "DELETE FROM transactions WHERE id = ?", [(i,) for i in ids]
+        "DELETE FROM transactions WHERE id = ?", [(i,) for i in sorted(present)]
     )
 
     return DeleteResult(
@@ -194,6 +236,7 @@ def superseded_ids(transactions: Sequence[Transaction]) -> list[str]:
 
 def save(
     conn: sqlite3.Connection,
+    user_id: str,
     accounts: Sequence[Account],
     transactions: Sequence[Transaction],
     synced_at: datetime | None = None,
@@ -207,15 +250,18 @@ def save(
     stamp = when.isoformat(timespec="seconds")
 
     with conn:
-        save_accounts(conn, accounts)
-        save_transactions(conn, transactions)
-        deletion = delete_transactions(conn, removed)
-        settled = delete_transactions(conn, superseded_ids(transactions))
+        if connection is not None:
+            save_connection(conn, user_id, connection, cursor=cursor,
+                            fetched_at=when)
+        save_accounts(conn, user_id, accounts)
+        save_transactions(conn, user_id, transactions)
+        deletion = delete_transactions(conn, user_id, removed)
+        settled = delete_transactions(
+            conn, user_id, superseded_ids(transactions)
+        )
         conn.execute(
             "UPDATE meta SET last_synced_at = ? WHERE id = 1", (stamp,)
         )
-        if connection is not None:
-            save_connection(conn, connection, cursor=cursor, fetched_at=when)
 
     return SaveResult(
         len(accounts),
@@ -229,49 +275,62 @@ def save(
 
 def save_connection(
     conn: sqlite3.Connection,
+    user_id: str,
     connection: ConnectionRef,
     cursor: str | None = None,
     fetched_at: datetime | None = None,
 ) -> None:
+    ensure_connections(
+        conn,
+        user_id,
+        {(connection.provider.value, connection.connection_id)},
+    )
     conn.execute(
-        "INSERT INTO connections (provider, connection_id, cursor, fetched_at) "
-        "VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(provider, connection_id) DO UPDATE SET "
-        "cursor = COALESCE(excluded.cursor, connections.cursor), "
-        "fetched_at = excluded.fetched_at",
+        "UPDATE connections SET "
+        "cursor = COALESCE(?, cursor), "
+        "fetched_at = ? "
+        "WHERE provider = ? AND connection_id = ? AND user_id = ?",
         (
-            connection.provider.value,
-            connection.connection_id,
             cursor,
             _iso(fetched_at),
+            connection.provider.value,
+            connection.connection_id,
+            user_id,
         ),
     )
 
 
-def cursor_for(conn: sqlite3.Connection, connection: ConnectionRef) -> str | None:
+def cursor_for(
+    conn: sqlite3.Connection, user_id: str, connection: ConnectionRef
+) -> str | None:
     row = conn.execute(
-        "SELECT cursor FROM connections WHERE provider = ? AND connection_id = ?",
-        (connection.provider.value, connection.connection_id),
+        "SELECT cursor FROM connections "
+        "WHERE provider = ? AND connection_id = ? AND user_id = ?",
+        (connection.provider.value, connection.connection_id, user_id),
     ).fetchone()
     return None if row is None else row["cursor"]
 
 
 def fetched_at_for(
-    conn: sqlite3.Connection, connection: ConnectionRef
+    conn: sqlite3.Connection, user_id: str, connection: ConnectionRef
 ) -> datetime | None:
     row = conn.execute(
         "SELECT fetched_at FROM connections "
-        "WHERE provider = ? AND connection_id = ?",
-        (connection.provider.value, connection.connection_id),
+        "WHERE provider = ? AND connection_id = ? AND user_id = ?",
+        (connection.provider.value, connection.connection_id, user_id),
     ).fetchone()
     return None if row is None else _to_datetime(row["fetched_at"])
 
 
-def load_connections(conn: sqlite3.Connection) -> dict[tuple[str, str], datetime | None]:
+def load_connections(
+    conn: sqlite3.Connection, user_id: str
+) -> dict[tuple[str, str], datetime | None]:
     return {
         (row["provider"], row["connection_id"]): _to_datetime(row["fetched_at"])
         for row in conn.execute(
-            "SELECT provider, connection_id, fetched_at FROM connections"
+            "SELECT provider, connection_id, fetched_at FROM connections "
+            "WHERE user_id = ?",
+            (user_id,),
         )
     }
 
@@ -281,8 +340,15 @@ def last_synced_at(conn: sqlite3.Connection) -> str | None:
     return None if row is None else row["last_synced_at"]
 
 
-def stored_providers(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute("SELECT DISTINCT provider FROM accounts ORDER BY provider")
+def stored_providers(conn: sqlite3.Connection, user_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT a.provider FROM accounts a "
+        "JOIN connections c "
+        "  ON c.provider = a.provider AND c.connection_id = a.connection_id "
+        "WHERE c.user_id = ? "
+        "ORDER BY a.provider",
+        (user_id,),
+    )
     return [row["provider"] for row in rows]
 
 
@@ -343,11 +409,24 @@ def transaction_from_row(
     )
 
 
-def load_accounts(conn: sqlite3.Connection) -> list[Account]:
-    fetched = load_connections(conn)
-    rows = conn.execute(
-        f"SELECT {', '.join(ACCOUNT_COLUMNS)} FROM accounts ORDER BY id"
+def _owned_by(table: str, columns: Sequence[str], order_by: str) -> str:
+    selected = ", ".join(f"t.{c}" for c in columns)
+    return (
+        f"SELECT {selected} FROM {table} t "
+        f"JOIN connections c "
+        f"  ON c.provider = t.provider AND c.connection_id = t.connection_id "
+        f"WHERE c.user_id = ? "
+        f"ORDER BY {order_by}"
     )
+
+
+ACCOUNT_SELECT = _owned_by("accounts", ACCOUNT_COLUMNS, "t.id")
+TRANSACTION_SELECT = _owned_by("transactions", TRANSACTION_COLUMNS, "t.date, t.id")
+
+
+def load_accounts(conn: sqlite3.Connection, user_id: str) -> list[Account]:
+    fetched = load_connections(conn, user_id)
+    rows = conn.execute(ACCOUNT_SELECT, (user_id,))
     return [
         account_from_row(
             row, fetched.get((row["provider"], row["connection_id"]))
@@ -356,12 +435,11 @@ def load_accounts(conn: sqlite3.Connection) -> list[Account]:
     ]
 
 
-def load_transactions(conn: sqlite3.Connection) -> list[Transaction]:
-    fetched = load_connections(conn)
-    rows = conn.execute(
-        f"SELECT {', '.join(TRANSACTION_COLUMNS)} FROM transactions "
-        f"ORDER BY date, id"
-    )
+def load_transactions(
+    conn: sqlite3.Connection, user_id: str
+) -> list[Transaction]:
+    fetched = load_connections(conn, user_id)
+    rows = conn.execute(TRANSACTION_SELECT, (user_id,))
     return [
         transaction_from_row(
             row, fetched.get((row["provider"], row["connection_id"]))

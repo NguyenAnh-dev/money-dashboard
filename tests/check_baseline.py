@@ -145,7 +145,7 @@ def render() -> str:
 
 @contextmanager
 def _seeded_database():
-    from core import repository, store
+    from core import repository, store, users
     from data_source import get_accounts, get_all_transactions
 
     previous = os.environ.get("DB_PATH")
@@ -155,6 +155,7 @@ def _seeded_database():
         try:
             repository.save(
                 conn,
+                users.ensure_local_user(conn),
                 get_accounts(),
                 get_all_transactions(),
                 synced_at=BASELINE_SYNCED_AT,

@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from core import repository, store
+from core import repository, store, users
 from core.money import format_money as dollars
 from insights import total_balance, spending_by_category, find_recurring
 
@@ -128,12 +128,14 @@ def main(console=None):
         show_no_data(console, path)
         return
 
+    user_id = users.LOCAL_USER_ID
+
     conn = store.open_db(path)
     try:
-        accounts = repository.load_accounts(conn)
-        transactions = repository.load_transactions(conn)
+        accounts = repository.load_accounts(conn, user_id)
+        transactions = repository.load_transactions(conn, user_id)
         synced_at = repository.last_synced_at(conn)
-        providers = repository.stored_providers(conn)
+        providers = repository.stored_providers(conn, user_id)
     finally:
         conn.close()
 

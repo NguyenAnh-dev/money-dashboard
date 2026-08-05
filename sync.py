@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from core import repository, store
+from core import repository, store, users
 from data_source import active_source_name, get_source
 
 
@@ -12,11 +12,15 @@ def sync() -> repository.SaveResult:
 
     conn = store.open_db()
     try:
-        result = source.fetch_transactions(repository.cursor_for(conn, connection))
+        user_id = users.ensure_local_user(conn)
+        result = source.fetch_transactions(
+            repository.cursor_for(conn, user_id, connection)
+        )
         accounts = source.fetch_accounts()
 
         return repository.save(
             conn,
+            user_id,
             accounts,
             [*result.added, *result.modified],
             cursor=result.cursor,

@@ -21,7 +21,7 @@ from rich.console import Console
 
 import main as app
 from adapters.fake import FakeSource
-from core import repository, store
+from core import repository, store, users
 from core.models import (
     Account,
     AccountType,
@@ -51,7 +51,8 @@ def _render(db_path, monkeypatch) -> str:
 def _seed(db_path, accounts, transactions, synced_at=None):
     conn = store.open_db(str(db_path))
     try:
-        repository.save(conn, accounts, transactions,
+        repository.save(conn, users.ensure_local_user(conn),
+                        accounts, transactions,
                         synced_at=synced_at or datetime(2026, 8, 1, 9, 0))
     finally:
         conn.close()

@@ -19,7 +19,7 @@ from datetime import date, datetime
 import pytest
 
 from adapters.fake import FakeSource
-from core import repository, store
+from core import repository, store, users
 from core.models import (
     Account,
     AccountType,
@@ -36,16 +36,33 @@ from core.models import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+USER = users.LOCAL_USER_ID
+
+
 @pytest.fixture
 def db(tmp_path):
     """A fresh database per test, in pytest's temp dir -- never DB_PATH.
 
     A test that touched the real money.db would be a test that destroys the
     user's data on a bad day.
+
+    Seeded with the local user, because every write below hangs off a
+    connections row and every connections row hangs off a user.
     """
     conn = store.open_db(str(tmp_path / "test.db"))
+    users.ensure_local_user(conn)
     yield conn
     conn.close()
+
+
+def _seed_connection(conn, provider="fake", connection_id="fixture",
+                     user_id=USER):
+    conn.execute(
+        "INSERT OR IGNORE INTO connections (provider, connection_id, user_id) "
+        "VALUES (?, ?, ?)",
+        (provider, connection_id, user_id),
+    )
+    conn.commit()
 
 
 def _account(provider_id="acc_1", balance_cents=100_000, **kwargs) -> Account:
@@ -106,7 +123,8 @@ def test_open_db_creates_both_tables_and_the_meta_row(db):
 def test_opening_an_existing_database_is_idempotent(tmp_path):
     path = str(tmp_path / "twice.db")
     first = store.open_db(path)
-    repository.save(first, [_account()], [])
+    users.ensure_local_user(first)
+    repository.save(first, USER, [_account()], [])
     first.close()
 
     second = store.open_db(path)
@@ -123,13 +141,14 @@ def test_foreign_keys_are_enforced(db):
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
     with pytest.raises(sqlite3.IntegrityError):
-        repository.save_transactions(db, [_transaction()])
+        repository.save_transactions(db, USER, [_transaction()])
 
 
 def test_an_integer_column_rejects_a_float(db):
     """INTEGER is an AFFINITY, not a type: without the typeof() CHECK, 12.34
     stores as a REAL and invariant 1 is breached in the layer everyone assumes
     is typed. __post_init__ cannot help -- raw SQL is a second door in."""
+    _seed_connection(db, "fake", "c")
     with pytest.raises(sqlite3.IntegrityError, match="typeof"):
         db.execute(
             "INSERT INTO accounts "
@@ -140,7 +159,7 @@ def test_an_integer_column_rejects_a_float(db):
 
 
 def test_a_float_amount_is_rejected_too(db):
-    repository.save_accounts(db, [_account()])
+    repository.save_accounts(db, USER, [_account()])
     with pytest.raises(sqlite3.IntegrityError, match="typeof"):
         db.execute(
             "INSERT INTO transactions "
@@ -160,7 +179,7 @@ def test_an_overpaid_credit_card_is_accepted(db):
     overpaid = _account(
         provider_id="amex", type=AccountType.CREDIT, balance_cents=5_000
     )
-    repository.save_accounts(db, [overpaid])
+    repository.save_accounts(db, USER, [overpaid])
     db.commit()
 
     stored = db.execute(
@@ -170,7 +189,7 @@ def test_an_overpaid_credit_card_is_accepted(db):
 
 
 def test_a_datetime_cannot_be_stored_in_the_date_column(db):
-    repository.save_accounts(db, [_account()])
+    repository.save_accounts(db, USER, [_account()])
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(
             "INSERT INTO transactions "
@@ -183,7 +202,7 @@ def test_a_datetime_cannot_be_stored_in_the_date_column(db):
 
 
 def test_an_empty_merchant_is_rejected(db):
-    repository.save_accounts(db, [_account()])
+    repository.save_accounts(db, USER, [_account()])
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(
             "INSERT INTO transactions "
@@ -275,7 +294,7 @@ def test_db_path_is_read_per_call_not_at_import(monkeypatch):
 
 def test_save_writes_accounts_and_transactions(db):
     account = _account()
-    result = repository.save(db, [account], [_transaction(account=account)])
+    result = repository.save(db, USER, [account], [_transaction(account=account)])
 
     assert result.accounts == 1
     assert result.transactions == 1
@@ -294,7 +313,7 @@ def test_every_model_field_survives_the_write(db):
         currency="usd",
         raw={"amount": 5.75, "authorized_date": date(2026, 7, 26)},
     )
-    repository.save(db, [account], [txn])
+    repository.save(db, USER, [account], [txn])
 
     a = db.execute("SELECT * FROM accounts").fetchone()
     assert a["id"] == account.id
@@ -319,7 +338,7 @@ def test_every_model_field_survives_the_write(db):
 
 def test_enums_are_stored_as_their_string_value(db):
     account = _account(type=AccountType.CREDIT, balance_cents=-1_000)
-    repository.save(db, [account], [
+    repository.save(db, USER, [account], [
         _transaction(account=account, kind=TransactionKind.INCOME)
     ])
 
@@ -338,10 +357,10 @@ def test_fetched_at_lives_on_the_connection_not_on_every_row(db):
     assert "fetched_at" not in columns
 
     connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
-    repository.save(db, [_account()], [], connection=connection,
+    repository.save(db, USER, [_account()], [], connection=connection,
                     synced_at=datetime(2026, 7, 27, 14, 3, 11))
 
-    assert repository.fetched_at_for(db, connection) == datetime(
+    assert repository.fetched_at_for(db, USER, connection) == datetime(
         2026, 7, 27, 14, 3, 11
     )
 
@@ -354,16 +373,16 @@ def test_a_resync_updates_instead_of_duplicating(db):
     account = _account()
     txns = [_transaction(account=account)]
 
-    repository.save(db, [account], txns)
-    repository.save(db, [account], txns)
+    repository.save(db, USER, [account], txns)
+    repository.save(db, USER, [account], txns)
 
     assert db.execute("SELECT COUNT(*) c FROM accounts").fetchone()["c"] == 1
     assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 1
 
 
 def test_a_changed_balance_overwrites_the_stored_one(db):
-    repository.save(db, [_account(balance_cents=100_000)], [])
-    repository.save(db, [_account(balance_cents=250_000)], [])
+    repository.save(db, USER, [_account(balance_cents=100_000)], [])
+    repository.save(db, USER, [_account(balance_cents=250_000)], [])
 
     stored = db.execute("SELECT balance_cents FROM accounts").fetchone()
     assert stored["balance_cents"] == 250_000
@@ -375,8 +394,8 @@ def test_a_pending_charge_that_settles_updates_the_same_row(db):
     amount or date that MOVES on settling, which rehashes to a new id -- is
     still Step 5 work; this pins the half that does work."""
     account = _account()
-    repository.save(db, [account], [_transaction(account=account, pending=True)])
-    repository.save(db, [account], [_transaction(account=account, pending=False)])
+    repository.save(db, USER, [account], [_transaction(account=account, pending=True)])
+    repository.save(db, USER, [account], [_transaction(account=account, pending=False)])
 
     rows = db.execute("SELECT pending FROM transactions").fetchall()
     assert len(rows) == 1
@@ -385,8 +404,8 @@ def test_a_pending_charge_that_settles_updates_the_same_row(db):
 
 def test_an_upsert_refreshes_every_column_not_just_the_changed_one(db):
     account = _account()
-    repository.save(db, [account], [_transaction(account=account)])
-    repository.save(db, [account], [
+    repository.save(db, USER, [account], [_transaction(account=account)])
+    repository.save(db, USER, [account], [
         _transaction(
             account=account,
             merchant="Blue Bottle Coffee",
@@ -412,9 +431,9 @@ def test_a_removed_id_deletes_the_row(db):
     places to forget, each failing silently by counting money that is gone."""
     account = _account()
     txn = _transaction(account=account)
-    repository.save(db, [account], [txn])
+    repository.save(db, USER, [account], [txn])
 
-    result = repository.save(db, [account], [], removed=[txn.id])
+    result = repository.save(db, USER, [account], [], removed=[txn.id])
 
     assert result.deleted == 1
     assert result.unmatched == ()
@@ -434,9 +453,9 @@ def test_a_removal_that_matches_nothing_is_reported_not_silent(db):
     sides are minting ids differently.
     """
     account = _account()
-    repository.save(db, [account], [_transaction(account=account)])
+    repository.save(db, USER, [account], [_transaction(account=account)])
 
-    result = repository.save(db, [account], [], removed=["plaid:item:never_seen"])
+    result = repository.save(db, USER, [account], [], removed=["plaid:item:never_seen"])
 
     assert result.deleted == 0
     assert result.unmatched == ("plaid:item:never_seen",)
@@ -448,9 +467,9 @@ def test_a_bare_provider_id_matches_nothing_and_says_so(db):
     not our id, so handing it through unmapped deletes nothing at all."""
     account = _account()
     txn = _transaction(account=account)
-    repository.save(db, [account], [txn])
+    repository.save(db, USER, [account], [txn])
 
-    result = repository.save(db, [account], [], removed=[txn.source.provider_id])
+    result = repository.save(db, USER, [account], [], removed=[txn.source.provider_id])
 
     assert result.deleted == 0
     assert result.unmatched == (txn.source.provider_id,)
@@ -462,21 +481,21 @@ def test_deletion_happens_inside_the_same_transaction_as_the_write(db):
     written -- data loss with no error state to notice it by."""
     account = _account()
     txn = _transaction(account=account)
-    repository.save(db, [account], [txn])
+    repository.save(db, USER, [account], [txn])
 
     orphan = _transaction(provider_id="orphan",
                           account=_account(provider_id="does_not_exist"))
     with pytest.raises(sqlite3.IntegrityError):
-        repository.save(db, [account], [orphan], removed=[txn.id])
+        repository.save(db, USER, [account], [orphan], removed=[txn.id])
 
     assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 1
 
 
 def test_deleting_nothing_is_a_no_op(db):
     account = _account()
-    repository.save(db, [account], [_transaction(account=account)])
+    repository.save(db, USER, [account], [_transaction(account=account)])
 
-    result = repository.save(db, [account], [], removed=[])
+    result = repository.save(db, USER, [account], [], removed=[])
 
     assert result.deleted == 0
     assert result.unmatched == ()
@@ -491,9 +510,9 @@ def test_a_removal_list_longer_than_sqlites_variable_limit_works(db):
     account = _account()
     txns = [_transaction(provider_id=f"txn_{i}", account=account)
             for i in range(repository.DELETE_CHUNK * 2 + 7)]
-    repository.save(db, [account], txns)
+    repository.save(db, USER, [account], txns)
 
-    result = repository.save(db, [account], [], removed=[t.id for t in txns])
+    result = repository.save(db, USER, [account], [], removed=[t.id for t in txns])
 
     assert result.deleted == len(txns)
     assert result.unmatched == ()
@@ -504,20 +523,20 @@ def test_deletion_leaves_other_rows_alone(db):
     account = _account()
     keep = _transaction(provider_id="keep", account=account)
     drop = _transaction(provider_id="drop", account=account)
-    repository.save(db, [account], [keep, drop])
+    repository.save(db, USER, [account], [keep, drop])
 
-    repository.save(db, [account], [], removed=[drop.id])
+    repository.save(db, USER, [account], [], removed=[drop.id])
 
-    remaining = [t.id for t in repository.load_transactions(db)]
+    remaining = [t.id for t in repository.load_transactions(db, USER)]
     assert remaining == [keep.id]
 
 
 def test_deleting_a_transaction_does_not_touch_its_account(db):
     account = _account()
     txn = _transaction(account=account)
-    repository.save(db, [account], [txn])
+    repository.save(db, USER, [account], [txn])
 
-    repository.save(db, [account], [], removed=[txn.id])
+    repository.save(db, USER, [account], [], removed=[txn.id])
 
     assert db.execute("SELECT COUNT(*) c FROM accounts").fetchone()["c"] == 1
 
@@ -543,13 +562,13 @@ def test_a_settled_transaction_deletes_the_pending_row_it_replaces(db):
     account = _account()
     pending = _transaction(provider_id="txn_pending", account=account,
                            pending=True)
-    repository.save(db, [account], [pending])
+    repository.save(db, USER, [account], [pending])
 
-    result = repository.save(db, [account],
+    result = repository.save(db, USER, [account],
                              [_settled(account, "txn_pending")])
 
     assert result.superseded == 1
-    remaining = repository.load_transactions(db)
+    remaining = repository.load_transactions(db, USER)
     assert len(remaining) == 1
     assert remaining[0].pending is False
 
@@ -562,12 +581,12 @@ def test_reconciliation_is_keyed_on_the_field_not_the_provider(db):
     account = _account()
     pending = _transaction(provider_id="txn_pending", account=account,
                            pending=True)
-    repository.save(db, [account], [pending])
+    repository.save(db, USER, [account], [pending])
 
     settled = _settled(account, "txn_pending")
     assert settled.source.provider is Provider.FAKE
 
-    assert repository.save(db, [account], [settled]).superseded == 1
+    assert repository.save(db, USER, [account], [settled]).superseded == 1
 
 
 def test_the_replaced_id_is_mapped_into_our_id_space(db):
@@ -596,9 +615,9 @@ def test_a_row_that_names_itself_is_not_deleted(db):
 
     assert repository.superseded_id(self_referencing) is None
 
-    result = repository.save(db, [account], [self_referencing])
+    result = repository.save(db, USER, [account], [self_referencing])
     assert result.superseded == 0
-    assert len(repository.load_transactions(db)) == 1
+    assert len(repository.load_transactions(db, USER)) == 1
 
 
 def test_a_missing_pending_twin_is_not_reported_as_unmatched(db):
@@ -608,7 +627,7 @@ def test_a_missing_pending_twin_is_not_reported_as_unmatched(db):
     matters."""
     account = _account()
 
-    result = repository.save(db, [account],
+    result = repository.save(db, USER, [account],
                              [_settled(account, "never_seen_pending")])
 
     assert result.superseded == 0
@@ -623,7 +642,7 @@ def test_a_null_pending_transaction_id_is_ignored(db):
                        raw={"pending_transaction_id": None, "other": 1})
 
     assert repository.superseded_id(txn) is None
-    assert repository.save(db, [account], [txn]).superseded == 0
+    assert repository.save(db, USER, [account], [txn]).superseded == 0
 
 
 def test_an_absent_key_is_ignored(db):
@@ -640,9 +659,9 @@ def test_both_halves_arriving_together_leave_only_the_settled_row(db):
                            pending=True)
     settled = _settled(account, "txn_pending")
 
-    result = repository.save(db, [account], [pending, settled])
+    result = repository.save(db, USER, [account], [pending, settled])
 
-    remaining = repository.load_transactions(db)
+    remaining = repository.load_transactions(db, USER)
     assert result.superseded == 1
     assert [t.id for t in remaining] == [settled.id]
 
@@ -651,15 +670,15 @@ def test_reconciliation_rolls_back_with_the_rest_of_the_sync(db):
     account = _account()
     pending = _transaction(provider_id="txn_pending", account=account,
                            pending=True)
-    repository.save(db, [account], [pending])
+    repository.save(db, USER, [account], [pending])
 
     orphan = _transaction(provider_id="orphan",
                           account=_account(provider_id="does_not_exist"))
     with pytest.raises(sqlite3.IntegrityError):
-        repository.save(db, [account],
+        repository.save(db, USER, [account],
                         [_settled(account, "txn_pending"), orphan])
 
-    assert [t.id for t in repository.load_transactions(db)] == [pending.id]
+    assert [t.id for t in repository.load_transactions(db, USER)] == [pending.id]
 
 
 # ---------------------------------------------------------------------------
@@ -673,18 +692,18 @@ def test_a_failed_transaction_write_rolls_back_the_accounts(db):
     orphan = _transaction(account=_account(provider_id="does_not_exist"))
 
     with pytest.raises(sqlite3.IntegrityError):
-        repository.save(db, [_account()], [orphan])
+        repository.save(db, USER, [_account()], [orphan])
 
     assert db.execute("SELECT COUNT(*) c FROM accounts").fetchone()["c"] == 0
     assert db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"] == 0
 
 
 def test_a_failed_write_leaves_last_synced_at_untouched(db):
-    repository.save(db, [_account()], [], synced_at=datetime(2026, 7, 1, 9, 0))
+    repository.save(db, USER, [_account()], [], synced_at=datetime(2026, 7, 1, 9, 0))
     orphan = _transaction(account=_account(provider_id="does_not_exist"))
 
     with pytest.raises(sqlite3.IntegrityError):
-        repository.save(db, [_account()], [orphan],
+        repository.save(db, USER, [_account()], [orphan],
                         synced_at=datetime(2026, 7, 28, 9, 0))
 
     assert repository.last_synced_at(db) == "2026-07-01T09:00:00"
@@ -694,7 +713,7 @@ def test_accounts_must_be_written_before_transactions(db):
     """The ordering inside save() is load-bearing, not stylistic."""
     account = _account()
     with pytest.raises(sqlite3.IntegrityError):
-        repository.save_transactions(db, [_transaction(account=account)])
+        repository.save_transactions(db, USER, [_transaction(account=account)])
         db.commit()
 
 
@@ -704,7 +723,7 @@ def test_accounts_must_be_written_before_transactions(db):
 
 def test_raw_defaults_to_an_empty_json_object(db):
     account = _account()
-    repository.save(db, [account], [_transaction(account=account)])
+    repository.save(db, USER, [account], [_transaction(account=account)])
 
     stored = db.execute("SELECT raw FROM transactions").fetchone()["raw"]
     assert stored == "{}"
@@ -720,7 +739,7 @@ def test_raw_serializes_the_date_objects_json_refuses(db):
         account=account,
         raw={"date": date(2026, 7, 27), "authorized": datetime(2026, 7, 26, 8, 30)},
     )
-    repository.save(db, [account], [txn])
+    repository.save(db, USER, [account], [txn])
 
     stored = json.loads(db.execute("SELECT raw FROM transactions").fetchone()["raw"])
     assert stored == {"date": "2026-07-27", "authorized": "2026-07-26T08:30:00"}
@@ -756,7 +775,7 @@ def test_a_field_json_genuinely_cannot_encode_still_raises(db):
 def test_save_stamps_last_synced_at(db):
     assert repository.last_synced_at(db) is None
 
-    result = repository.save(db, [_account()], [],
+    result = repository.save(db, USER, [_account()], [],
                              synced_at=datetime(2026, 7, 28, 11, 30, 15))
 
     assert result.synced_at == "2026-07-28T11:30:15"
@@ -765,10 +784,10 @@ def test_save_stamps_last_synced_at(db):
 
 def test_a_cursor_is_stored_per_connection(db):
     connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
-    repository.save(db, [_account()], [], cursor="cursor-abc",
+    repository.save(db, USER, [_account()], [], cursor="cursor-abc",
                     connection=connection)
 
-    assert repository.cursor_for(db, connection) == "cursor-abc"
+    assert repository.cursor_for(db, USER, connection) == "cursor-abc"
 
 
 def test_a_source_without_a_cursor_does_not_erase_the_stored_one(db):
@@ -779,16 +798,16 @@ def test_a_source_without_a_cursor_does_not_erase_the_stored_one(db):
     until the next sync silently refetches from the beginning of time.
     """
     connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
-    repository.save(db, [_account()], [], cursor="cursor-abc",
+    repository.save(db, USER, [_account()], [], cursor="cursor-abc",
                     connection=connection)
-    repository.save(db, [_account()], [], cursor=None, connection=connection)
+    repository.save(db, USER, [_account()], [], cursor=None, connection=connection)
 
-    assert repository.cursor_for(db, connection) == "cursor-abc"
+    assert repository.cursor_for(db, USER, connection) == "cursor-abc"
 
 
 def test_a_new_database_has_no_cursor(db):
     connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
-    assert repository.cursor_for(db, connection) is None
+    assert repository.cursor_for(db, USER, connection) is None
 
 
 def test_two_connections_keep_separate_cursors(db):
@@ -798,12 +817,12 @@ def test_two_connections_keep_separate_cursors(db):
     first = ConnectionRef(provider=Provider.PLAID, connection_id="item_1")
     second = ConnectionRef(provider=Provider.PLAID, connection_id="item_2")
 
-    repository.save_connection(db, first, cursor="cursor-1")
-    repository.save_connection(db, second, cursor="cursor-2")
+    repository.save_connection(db, USER, first, cursor="cursor-1")
+    repository.save_connection(db, USER, second, cursor="cursor-2")
     db.commit()
 
-    assert repository.cursor_for(db, first) == "cursor-1"
-    assert repository.cursor_for(db, second) == "cursor-2"
+    assert repository.cursor_for(db, USER, first) == "cursor-1"
+    assert repository.cursor_for(db, USER, second) == "cursor-2"
 
 
 def test_a_fake_sync_cannot_clobber_a_plaid_cursor(db):
@@ -812,15 +831,15 @@ def test_a_fake_sync_cannot_clobber_a_plaid_cursor(db):
     plaid = ConnectionRef(provider=Provider.PLAID, connection_id="item_1")
     fake = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
 
-    repository.save_connection(db, plaid, cursor="plaid-cursor")
-    repository.save(db, [_account()], [], connection=fake)
+    repository.save_connection(db, USER, plaid, cursor="plaid-cursor")
+    repository.save(db, USER, [_account()], [], connection=fake)
 
-    assert repository.cursor_for(db, plaid) == "plaid-cursor"
+    assert repository.cursor_for(db, USER, plaid) == "plaid-cursor"
 
 
 def test_save_defaults_the_stamp_to_now(db):
     before = datetime.now().isoformat(timespec="seconds")
-    repository.save(db, [_account()], [])
+    repository.save(db, USER, [_account()], [])
     assert repository.last_synced_at(db) >= before
 
 
@@ -836,11 +855,11 @@ def test_the_whole_fake_fixture_writes_and_re_writes(db):
     accounts = source.fetch_accounts()
     transactions = source.fetch_transactions().added
 
-    first = repository.save(db, accounts, transactions)
+    first = repository.save(db, USER, accounts, transactions)
     assert first.accounts == len(accounts)
     assert first.transactions == len(transactions)
 
-    repository.save(db, accounts, transactions)
+    repository.save(db, USER, accounts, transactions)
 
     stored_accounts = db.execute("SELECT COUNT(*) c FROM accounts").fetchone()["c"]
     stored_txns = db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"]
@@ -860,10 +879,10 @@ def test_the_whole_fixture_round_trips(db):
     source = FakeSource()
     accounts = source.fetch_accounts()
     transactions = source.fetch_transactions().added
-    repository.save(db, accounts, transactions)
+    repository.save(db, USER, accounts, transactions)
 
-    loaded_accounts = repository.load_accounts(db)
-    loaded_txns = repository.load_transactions(db)
+    loaded_accounts = repository.load_accounts(db, USER)
+    loaded_txns = repository.load_transactions(db, USER)
 
     assert len(loaded_accounts) == len(accounts)
     assert len(loaded_txns) == len(transactions)
@@ -884,9 +903,9 @@ def test_the_whole_fixture_round_trips(db):
 
 def test_a_date_comes_back_as_a_date_not_a_string(db):
     account = _account()
-    repository.save(db, [account], [_transaction(account=account)])
+    repository.save(db, USER, [account], [_transaction(account=account)])
 
-    restored = repository.load_transactions(db)[0]
+    restored = repository.load_transactions(db, USER)[0]
     assert restored.date == date(2026, 7, 27)
     assert isinstance(restored.date, date)
     assert not isinstance(restored.date, datetime)
@@ -898,24 +917,24 @@ def test_pending_comes_back_as_a_real_bool(db):
     exactly why this is easy to miss and worth pinning: `is True` fails, and so
     does anything doing an identity or type check downstream."""
     account = _account()
-    repository.save(db, [account], [
+    repository.save(db, USER, [account], [
         _transaction(provider_id="p", account=account, pending=True),
         _transaction(provider_id="s", account=account, pending=False),
     ])
 
-    by_id = {t.source.provider_id: t for t in repository.load_transactions(db)}
+    by_id = {t.source.provider_id: t for t in repository.load_transactions(db, USER)}
     assert by_id["p"].pending is True
     assert by_id["s"].pending is False
 
 
 def test_enums_come_back_as_enum_members(db):
     account = _account(type=AccountType.CREDIT, balance_cents=-1_000)
-    repository.save(db, [account], [
+    repository.save(db, USER, [account], [
         _transaction(account=account, kind=TransactionKind.TRANSFER)
     ])
 
-    assert repository.load_accounts(db)[0].type is AccountType.CREDIT
-    restored = repository.load_transactions(db)[0]
+    assert repository.load_accounts(db, USER)[0].type is AccountType.CREDIT
+    restored = repository.load_transactions(db, USER)[0]
     assert restored.kind is TransactionKind.TRANSFER
     assert restored.source.provider is Provider.FAKE
 
@@ -929,10 +948,10 @@ def test_source_ref_is_reassembled_from_its_columns_plus_the_connection(db):
     was fetched, not a property of the row.
     """
     connection = ConnectionRef(provider=Provider.FAKE, connection_id="fixture")
-    repository.save(db, [_account()], [], connection=connection,
+    repository.save(db, USER, [_account()], [], connection=connection,
                     synced_at=datetime(2026, 7, 27, 14, 3, 11))
 
-    restored = repository.load_accounts(db)[0].source
+    restored = repository.load_accounts(db, USER)[0].source
     assert restored.provider is Provider.FAKE
     assert restored.provider_id == "acc_1"
     assert restored.connection_id == "fixture"
@@ -940,25 +959,25 @@ def test_source_ref_is_reassembled_from_its_columns_plus_the_connection(db):
 
 
 def test_a_null_fetched_at_comes_back_as_none_not_a_string(db):
-    repository.save(db, [_account()], [])
-    assert repository.load_accounts(db)[0].source.fetched_at is None
+    repository.save(db, USER, [_account()], [])
+    assert repository.load_accounts(db, USER)[0].source.fetched_at is None
 
 
 def test_nullable_account_fields_survive_being_absent(db):
-    repository.save(db, [_account()], [])
+    repository.save(db, USER, [_account()], [])
 
-    restored = repository.load_accounts(db)[0]
+    restored = repository.load_accounts(db, USER)[0]
     assert restored.mask is None
     assert restored.available_cents is None
     assert restored.as_of is None
 
 
 def test_nullable_account_fields_survive_being_present(db):
-    repository.save(db, [_account(
+    repository.save(db, USER, [_account(
         mask="4321", available_cents=99_000, as_of=date(2026, 7, 27)
     )], [])
 
-    restored = repository.load_accounts(db)[0]
+    restored = repository.load_accounts(db, USER)[0]
     assert restored.mask == "4321"
     assert restored.available_cents == 99_000
     assert restored.as_of == date(2026, 7, 27)
@@ -966,11 +985,11 @@ def test_nullable_account_fields_survive_being_present(db):
 
 def test_raw_comes_back_as_a_dict(db):
     account = _account()
-    repository.save(db, [account], [
+    repository.save(db, USER, [account], [
         _transaction(account=account, raw={"pending_transaction_id": "abc123"})
     ])
 
-    restored = repository.load_transactions(db)[0]
+    restored = repository.load_transactions(db, USER)[0]
     assert isinstance(restored.raw, dict)
     assert restored.raw["pending_transaction_id"] == "abc123"
 
@@ -981,9 +1000,9 @@ def test_raw_is_read_by_field_not_compared_wholesale(db):
     -- what 5.7 depends on is one field, and that survives."""
     account = _account()
     original = {"pending_transaction_id": "abc123", "date": date(2026, 7, 27)}
-    repository.save(db, [account], [_transaction(account=account, raw=original)])
+    repository.save(db, USER, [account], [_transaction(account=account, raw=original)])
 
-    restored = repository.load_transactions(db)[0].raw
+    restored = repository.load_transactions(db, USER)[0].raw
     assert restored != original
     assert restored["pending_transaction_id"] == original["pending_transaction_id"]
     assert restored["date"] == "2026-07-27"
@@ -991,15 +1010,15 @@ def test_raw_is_read_by_field_not_compared_wholesale(db):
 
 def test_an_empty_raw_round_trips_exactly(db):
     account = _account()
-    repository.save(db, [account], [_transaction(account=account)])
-    assert repository.load_transactions(db)[0].raw == {}
+    repository.save(db, USER, [account], [_transaction(account=account)])
+    assert repository.load_transactions(db, USER)[0].raw == {}
 
 
 def test_transactions_come_back_in_date_order(db):
     source = FakeSource()
-    repository.save(db, source.fetch_accounts(), source.fetch_transactions().added)
+    repository.save(db, USER, source.fetch_accounts(), source.fetch_transactions().added)
 
-    dates = [t.date for t in repository.load_transactions(db)]
+    dates = [t.date for t in repository.load_transactions(db, USER)]
     assert dates == sorted(dates)
 
 
@@ -1012,18 +1031,18 @@ def test_read_order_is_total_and_independent_of_write_order(db):
     accounts = source.fetch_accounts()
     transactions = source.fetch_transactions().added
 
-    repository.save(db, accounts, transactions)
-    forwards = [t.id for t in repository.load_transactions(db)]
+    repository.save(db, USER, accounts, transactions)
+    forwards = [t.id for t in repository.load_transactions(db, USER)]
 
-    repository.save(db, accounts, list(reversed(transactions)))
-    backwards = [t.id for t in repository.load_transactions(db)]
+    repository.save(db, USER, accounts, list(reversed(transactions)))
+    backwards = [t.id for t in repository.load_transactions(db, USER)]
 
     assert forwards == backwards
 
 
 def test_reading_an_empty_database_returns_empty_lists(db):
-    assert repository.load_accounts(db) == []
-    assert repository.load_transactions(db) == []
+    assert repository.load_accounts(db, USER) == []
+    assert repository.load_transactions(db, USER) == []
 
 
 def test_the_read_path_returns_everything_unfiltered(db):
@@ -1032,9 +1051,9 @@ def test_the_read_path_returns_everything_unfiltered(db):
     signature."""
     source = FakeSource()
     transactions = source.fetch_transactions().added
-    repository.save(db, source.fetch_accounts(), transactions)
+    repository.save(db, USER, source.fetch_accounts(), transactions)
 
-    assert len(repository.load_transactions(db)) == len(transactions)
+    assert len(repository.load_transactions(db, USER)) == len(transactions)
 
 
 def test_loaded_transactions_still_satisfy_model_invariants(db):
@@ -1042,9 +1061,9 @@ def test_loaded_transactions_still_satisfy_model_invariants(db):
     row -- which means a corrupted amount or currency in the database fails on
     load rather than three layers up in a total."""
     source = FakeSource()
-    repository.save(db, source.fetch_accounts(), source.fetch_transactions().added)
+    repository.save(db, USER, source.fetch_accounts(), source.fetch_transactions().added)
 
-    for txn in repository.load_transactions(db):
+    for txn in repository.load_transactions(db, USER):
         assert isinstance(txn.amount_cents, int)
         assert not isinstance(txn.amount_cents, bool)
         assert txn.merchant
@@ -1059,8 +1078,8 @@ def test_insights_produce_the_same_answers_from_the_database(db):
     source = FakeSource()
     accounts = source.fetch_accounts()
     transactions = source.fetch_transactions().added
-    repository.save(db, accounts, transactions)
-    loaded = repository.load_transactions(db)
+    repository.save(db, USER, accounts, transactions)
+    loaded = repository.load_transactions(db, USER)
 
     assert spending_by_category(loaded) == spending_by_category(transactions)
     assert find_recurring(loaded) == find_recurring(transactions)
@@ -1085,9 +1104,9 @@ def test_a_real_plaid_payload_round_trips(db):
     accounts = [to_account(a, item_id) for a in payload["accounts"]]
     transactions = [to_transaction(t, item_id) for t in payload["transactions"]]
 
-    repository.save(db, accounts, transactions)
+    repository.save(db, USER, accounts, transactions)
 
-    loaded = {t.id: t for t in repository.load_transactions(db)}
+    loaded = {t.id: t for t in repository.load_transactions(db, USER)}
     assert len(loaded) == len(transactions)
 
     for original in transactions:
@@ -1099,7 +1118,7 @@ def test_a_real_plaid_payload_round_trips(db):
         assert restored.source == original.source
         assert restored.raw["transaction_id"] == original.raw["transaction_id"]
 
-    by_id = {a.id: a for a in repository.load_accounts(db)}
+    by_id = {a.id: a for a in repository.load_accounts(db, USER)}
     for original in accounts:
         assert by_id[original.id] == original
 
@@ -1108,7 +1127,7 @@ def test_every_stored_transaction_joins_to_a_stored_account(db):
     """STRUCTURE's namespacing check, asked of the database. The FK makes this
     impossible to violate, which is the point of having it."""
     source = FakeSource()
-    repository.save(db, source.fetch_accounts(), source.fetch_transactions().added)
+    repository.save(db, USER, source.fetch_accounts(), source.fetch_transactions().added)
 
     orphans = db.execute(
         "SELECT COUNT(*) c FROM transactions t "

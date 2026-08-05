@@ -19,6 +19,16 @@ plaid-python==42.0.0
 # .env.example is the committed record of which keys exist.
 python-dotenv==1.2.2
 
+# Password hashing (Step 6.2). RUNTIME, and deliberately NOT hashlib: a
+# general-purpose hash is built to be fast, which is the one property a
+# password hash must not have. argon2id is the current default recommendation
+# and the library ships sane parameters plus a rehash signal.
+#
+# Pulls argon2-cffi-bindings, cffi and pycparser -- a C extension, so this is
+# the first dependency here that is not pure Python. Nothing under adapters/
+# imports it; core/passwords.py is the only module that does.
+argon2-cffi==25.1.0
+
 # Test-only. Kept in the same file rather than a requirements-dev.txt because
 # there is one environment here (./venv) and one person in it; a split would be
 # two files to forget to install. Nothing under core/, adapters/ or main.py may
