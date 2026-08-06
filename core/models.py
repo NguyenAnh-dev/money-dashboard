@@ -148,6 +148,20 @@ def make_id(source: SourceRef) -> str:
     ))
 
 
+def scoped_connection_id(connection_id: str, user_id: str) -> str:
+    if not connection_id:
+        raise ValueError(
+            "connection_id must not be empty -- there is nothing to scope"
+        )
+    if not user_id:
+        raise ValueError(
+            "user_id must not be empty -- an unscoped connection id is the "
+            "collision this function exists to remove, and a blank one would "
+            "produce a second spelling of it"
+        )
+    return f"{connection_id}:{user_id}"
+
+
 def _escape_segment(segment: str, field_name: str) -> str:
     """Make a segment safe to join with ':' without losing injectivity.
 

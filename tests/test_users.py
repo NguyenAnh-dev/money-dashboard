@@ -27,6 +27,7 @@ from core.models import (
     SourceRef,
     Transaction,
     make_id,
+    scoped_connection_id,
 )
 
 
@@ -533,6 +534,76 @@ def test_a_connection_belongs_to_exactly_one_user(db, other):
 
     assert repository.load_accounts(db, other) == []
     assert len(repository.load_accounts(db, users.LOCAL_USER_ID)) == 1
+
+
+def test_two_users_can_each_sync_the_fixture(db, other):
+    """The ceiling §6 of docs/USERS.md documented, lifted at Step 7.
+
+    The test above is unchanged and still correct: a connection belongs to one
+    user, and writing another user's connection is refused. What changed is that
+    the fixture no longer HANDS both users the same connection to fight over --
+    `sync.py` builds it with a per-user connection id, so the second user's rows
+    sit beside the first's instead of colliding with them.
+
+    Asserted through the adapter rather than through hand-built rows, because
+    the constant that used to be shared lives there.
+    """
+    from adapters.fake import CONNECTION_ID, FakeSource
+
+    for user in (users.LOCAL_USER_ID, other):
+        source = FakeSource(
+            connection_id=scoped_connection_id(CONNECTION_ID, user)
+        )
+        repository.save(db, user, source.fetch_accounts(),
+                        source.fetch_transactions().added,
+                        connection=source.connection())
+
+    mine = repository.load_accounts(db, users.LOCAL_USER_ID)
+    theirs = repository.load_accounts(db, other)
+
+    assert len(mine) == len(theirs) == 3
+    assert not {a.id for a in mine} & {a.id for a in theirs}
+
+
+def test_neither_user_can_see_the_others_fixture_rows(db, other):
+    """Two identical fixtures is the worst case for a leak: same merchants,
+    same amounts, same account names. An unscoped read doubles every number
+    while looking like a busy month, which is the failure nobody spots."""
+    from adapters.fake import CONNECTION_ID, FakeSource
+
+    for user in (users.LOCAL_USER_ID, other):
+        source = FakeSource(
+            connection_id=scoped_connection_id(CONNECTION_ID, user)
+        )
+        repository.save(db, user, source.fetch_accounts(),
+                        source.fetch_transactions().added)
+
+    both = FakeSource().fetch_transactions().added
+
+    assert len(repository.load_transactions(db, other)) == len(both)
+    assert (sum(t.amount_cents for t in repository.load_transactions(db, other))
+            == sum(t.amount_cents for t in both))
+
+
+def test_a_scoped_connection_id_names_its_owner(db):
+    """The id format, stated once. `make_id` is unchanged -- the user segment
+    lives INSIDE the connection id rather than becoming a fourth segment, which
+    is what keeps every row minted before Step 7 reconstructible from its own
+    SourceRef."""
+    scoped = scoped_connection_id("fixture", users.LOCAL_USER_ID)
+
+    assert scoped == f"fixture:{users.LOCAL_USER_ID}"
+    assert len(make_id(SourceRef(
+        provider=Provider.FAKE, provider_id="acc_1", connection_id=scoped,
+    )).split(":")) == 3
+
+
+@pytest.mark.parametrize("connection_id, user_id", [
+    ("", "u"), ("fixture", ""),
+])
+def test_a_blank_segment_is_refused(connection_id, user_id):
+    with pytest.raises(ValueError, match="must not be empty"):
+        scoped_connection_id(connection_id, user_id)
 
 
 def test_a_sync_creates_the_connection_it_needs(db):

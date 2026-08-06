@@ -235,18 +235,37 @@ Keeping the global key makes it impossible, and
 `repository.ensure_connections` raises when a sync tries to write a connection
 another user owns.
 
-**The live consequence, stated plainly:** a second user **cannot sync the fake
-source**, because `FakeSource.CONNECTION_ID` is the constant `"fixture"` for
-everybody. That is the correct signal rather than a bug in the fixture — it is
-the id namespace saying it is not yet multi-user. Real multi-user needs one of:
+**The live consequence at Step 6, stated plainly:** a second user **could not
+sync the fake source**, because `FakeSource.CONNECTION_ID` was the constant
+`"fixture"` for everybody. That was the correct signal rather than a bug in the
+fixture — it was the id namespace saying it was not yet multi-user. Real
+multi-user needed one of:
 
 - connection ids minted per user (a real Plaid Item id already is, per
   enrollment — this is only a problem for sources that hardcode one), or
 - a user segment in `make_id`, which rekeys **every row ever minted** and is
   therefore a much larger decision than it looks.
 
-Deferred deliberately. `test_a_connection_belongs_to_exactly_one_user` documents
-the ceiling by failing loudly at it.
+### Resolved at Step 7 — the first option
+
+`FakeSource` and `CsvSource` now take a `connection_id`, and
+`data_source.get_source(user_id)` hands them
+`scoped_connection_id(CONNECTION_ID, user_id)` → `"fixture:<uuid>"`. `sync.py`
+supplies the user; `get_accounts()` and a bare `FakeSource()` do not, and are
+unchanged. **Plaid is deliberately not scoped**: an Item id is already unique per
+user per institution, and rekeying it would cost the one connection a re-sync
+cannot rebuild.
+
+`make_id` did not change, and that is the point of choosing this option — the
+user segment lives *inside* the connection id, escaped to `%3A`, so ids stay
+three segments and every existing Plaid row keeps its key. Existing databases are
+rekeyed by the v6→v7 migration; see `docs/MIGRATIONS.md` §6.
+
+**The constraint in this section is unchanged and still enforced.** A connection
+still belongs to exactly one user and `ensure_connections` still raises on a
+cross-user write —`test_a_connection_belongs_to_exactly_one_user` still passes.
+What changed is that the fixture no longer *hands* two users the same connection
+to collide over. `test_two_users_can_each_sync_the_fixture` is the other half.
 
 ---
 
@@ -281,8 +300,9 @@ it is actually for — the cursor and `fetched_at`.
   script.** There is no signup path, which is fine while `LOCAL_USER_ID` is the
   only user any command reaches for.
 - **`meta.last_synced_at` is global**, per §5.
-- **The id namespace is not multi-user**, per §6. This is the one to resolve
-  before anything real depends on two users coexisting.
-- **No migration path**, still. Four schema versions in four steps is fine while
-  the database is disposable; it stops being fine the day it holds something a
-  re-sync cannot rebuild.
+- ~~**The id namespace is not multi-user**, per §6.~~ Resolved at Step 7 by
+  scoping the connection id; see §6 and `docs/MIGRATIONS.md`.
+- ~~**No migration path**, still.~~ Added at Step 7, with v6 as the declared
+  floor. The prediction in this line held exactly: four schema versions in four
+  steps was fine while the database was disposable, and it stopped being fine at
+  6.3, the first version to hold something a re-sync cannot rebuild.

@@ -19,7 +19,7 @@ from datetime import date, datetime
 import pytest
 
 from adapters.fake import FakeSource
-from core import repository, store, users
+from core import migrations, repository, store, users
 from core.models import (
     Account,
     AccountType,
@@ -225,12 +225,35 @@ def _force_version(path: str, version: int) -> None:
     conn.close()
 
 
-def test_an_older_schema_version_is_refused(tmp_path):
+def test_an_older_schema_version_is_migrated_not_refused(tmp_path):
+    """The 5.3 policy, reversed deliberately. "Delete the file and re-sync" was
+    cheap while everything in the file was reproducible; a linked Plaid Item is
+    not, so from v7 an older file is walked forward instead."""
     path = str(tmp_path / "old.db")
     store.open_db(path).close()
     _force_version(path, store.SCHEMA_VERSION - 1)
 
-    with pytest.raises(RuntimeError, match="older than"):
+    conn = store.open_db(path)
+    try:
+        row = conn.execute(
+            "SELECT schema_version FROM meta WHERE id = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["schema_version"] == store.SCHEMA_VERSION
+
+
+def test_a_version_below_the_migration_floor_is_refused(tmp_path):
+    """v6 is the floor, and it is a floor rather than a gap to be filled: no
+    database outside this repository was ever written at v1-v5, so five
+    migrations nobody will run is code that can only rot."""
+    path = str(tmp_path / "ancient.db")
+    store.open_db(path).close()
+    _force_version(path, migrations.EARLIEST_SUPPORTED_VERSION - 1)
+
+    with pytest.raises(migrations.UnsupportedSchemaVersion,
+                       match="older than the earliest"):
         store.open_db(path)
 
 

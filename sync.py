@@ -29,7 +29,7 @@ def sources_for(conn, user_id: str, include_configured: bool = True) -> list:
 
     known = {source.connection() for source in sources}
     try:
-        configured = get_source()
+        configured = get_source(user_id)
     except Exception as exc:
         if not sources:
             raise

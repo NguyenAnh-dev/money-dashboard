@@ -231,15 +231,19 @@ def test_sync_builds_exactly_one_source(tmp_path, monkeypatch):
     built = []
     real = data_source.get_source
 
-    def counting_get_source():
-        built.append(1)
-        return real()
+    def counting_get_source(user_id=None):
+        built.append(user_id)
+        return real(user_id)
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "sync.db"))
     monkeypatch.setattr(sync_module, "get_source", counting_get_source)
     sync_module.sync()
 
     assert len(built) == 1
+    assert built == [users.LOCAL_USER_ID], (
+        "the source has to be built FOR an owner: an unscoped fixture mints "
+        "the same ids for everybody"
+    )
 
 
 def test_sync_fetches_transactions_before_accounts(tmp_path, monkeypatch):
@@ -265,7 +269,8 @@ def test_sync_fetches_transactions_before_accounts(tmp_path, monkeypatch):
             return SyncResult()
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "sync.db"))
-    monkeypatch.setattr(sync_module, "get_source", lambda: Recording())
+    monkeypatch.setattr(sync_module, "get_source",
+                        lambda user_id=None: Recording())
     sync_module.sync()
 
     assert calls == ["transactions", "accounts"]
@@ -280,7 +285,7 @@ def test_sync_writes_what_the_source_returned(tmp_path, monkeypatch):
 
     source = FakeSource()
     assert len(runs) == 1, "one configured source, no linked connections"
-    assert runs[0].connection.connection_id == "fixture"
+    assert runs[0].connection.connection_id == f"fixture:{users.LOCAL_USER_ID}"
     assert runs[0].result.accounts == len(source.fetch_accounts())
     assert runs[0].result.transactions == len(source.fetch_transactions().added)
 

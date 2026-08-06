@@ -519,7 +519,7 @@ def test_the_cli_path_is_unchanged_when_nothing_is_linked(db, monkeypatch,
     sources = sync_module.sources_for(db, user_id)
 
     assert len(sources) == 1
-    assert sources[0].connection().connection_id == "fixture"
+    assert sources[0].connection().connection_id == f"fixture:{user_id}"
     assert stub_plaid_source.built == []
 
 
@@ -534,8 +534,26 @@ def test_linked_connections_are_synced_alongside_the_configured_source(
     sources = sync_module.sources_for(db, ada)
 
     assert sorted(s.connection().connection_id for s in sources) == [
-        "fixture", "item_1",
+        f"fixture:{ada}", "item_1",
     ]
+
+
+def test_a_linked_item_id_is_not_scoped_to_its_owner(db, ada, monkeypatch,
+                                                     stub_plaid_source):
+    """The fixture and the CSV get a user segment; Plaid does not, and the
+    asymmetry is the point. An Item id is already unique per user per
+    institution, so scoping it would rekey every linked account to buy a
+    property it has by construction -- and it would do it to the one connection
+    a re-sync cannot rebuild without a browser and a human."""
+    import sync as sync_module
+
+    monkeypatch.setenv("DATA_SOURCE", "fake")
+    _link(db, ada, "item_1", ACCESS_TOKEN)
+
+    linked = sync_module.linked_sources(db, ada)
+
+    assert [s.connection().connection_id for s in linked] == ["item_1"]
+    assert ada not in linked[0].connection().connection_id
 
 
 # ---------------------------------------------------------------------------

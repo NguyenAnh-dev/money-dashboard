@@ -237,28 +237,32 @@ class CsvAccount:
 DEFAULT_ACCOUNT = CsvAccount()
 
 
-def _ref(provider_id: str) -> SourceRef:
+def _ref(provider_id: str, connection_id: str = CONNECTION_ID) -> SourceRef:
     """Provenance for one record of this connection.
 
     `fetched_at` stays None for the same reason the fixture leaves it None: a
     file on disk was not fetched at a moment, and a timestamp here would be a
     lie that reads as a fact in a debug dump.
+
+    `connection_id` is an argument for the reason adapters/fake.py's is: the
+    constant is the same string for every user, so the sync path supplies a
+    scoped one instead.
     """
     return SourceRef(
         provider=PROVIDER,
         provider_id=provider_id,
-        connection_id=CONNECTION_ID,
+        connection_id=connection_id,
     )
 
 
-def _ns(provider_id: str) -> str:
+def _ns(provider_id: str, connection_id: str = CONNECTION_ID) -> str:
     """Bare provider id -> our namespaced id. "account" -> "csv:bank_export:account".
 
     BOTH fetch methods route through this, which is what stops the failure the
     structural gate exists to catch: namespacing the account while transactions
     keep a bare id renders byte-identically and joins to nothing.
     """
-    return make_id(_ref(provider_id))
+    return make_id(_ref(provider_id, connection_id))
 
 
 # ---------------------------------------------------------------------------
@@ -274,11 +278,17 @@ class CsvSource:
     untestable for anything that imports this module early.
 
     `account` is the identity of the statement (see CsvAccount).
+
+    `connection_id` defaults to the module constant and is scoped per user by
+    the sync path, because one import batch named "bank_export" is the same
+    string for everybody -- see docs/USERS.md §6.
     """
 
-    def __init__(self, path: str | None = None, account: CsvAccount = DEFAULT_ACCOUNT) -> None:
+    def __init__(self, path: str | None = None, account: CsvAccount = DEFAULT_ACCOUNT,
+                 connection_id: str = CONNECTION_ID) -> None:
         self.path = path or os.getenv("CSV_PATH", DEFAULT_PATH)
         self.account = account
+        self.connection_id = connection_id
 
     def fetch_accounts(self) -> list[Account]:
         """The one account this statement is a statement of.
@@ -289,8 +299,8 @@ class CsvSource:
         """
         return [
             Account(
-                id=_ns(self.account.provider_id),
-                source=_ref(self.account.provider_id),
+                id=_ns(self.account.provider_id, self.connection_id),
+                source=_ref(self.account.provider_id, self.connection_id),
                 name=self.account.name,
                 institution=self.account.institution,
                 type=self.account.type,
@@ -300,7 +310,7 @@ class CsvSource:
         ]
 
     def connection(self) -> ConnectionRef:
-        return ConnectionRef(provider=PROVIDER, connection_id=CONNECTION_ID)
+        return ConnectionRef(provider=PROVIDER, connection_id=self.connection_id)
 
     def fetch_transactions(self, cursor: str | None = None) -> SyncResult:
         """Parse every row of the export into a Transaction.
@@ -310,7 +320,7 @@ class CsvSource:
         on how many times the adapter had been called in this process.
         """
         minter = ContentIdMinter("txn")
-        account_id = _ns(self.account.provider_id)
+        account_id = _ns(self.account.provider_id, self.connection_id)
 
         transactions: list[Transaction] = []
         # newline="" is required by the csv module, not optional style: without
@@ -361,8 +371,8 @@ class CsvSource:
         )
 
         return Transaction(
-            id=_ns(provider_id),
-            source=_ref(provider_id),
+            id=_ns(provider_id, self.connection_id),
+            source=_ref(provider_id, self.connection_id),
             account_id=account_id,
             date=when,
             name=description,

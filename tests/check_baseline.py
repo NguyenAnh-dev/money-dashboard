@@ -153,11 +153,18 @@ def _seeded_database():
         os.environ["DB_PATH"] = str(Path(tmp) / "baseline.db")
         conn = store.open_db()
         try:
+            # The user id is passed to the ADAPTER as well as to the write, so
+            # the seeded rows carry the connection id sync.py would have minted
+            # ("fake:fixture%3A<local user>:..."). Seeding through an unscoped
+            # source would pin a set of ids no command produces, and the gate
+            # would then keep passing after the sync path started writing
+            # different ones.
+            user_id = users.ensure_local_user(conn)
             repository.save(
                 conn,
-                users.ensure_local_user(conn),
-                get_accounts(),
-                get_all_transactions(),
+                user_id,
+                get_accounts(user_id),
+                get_all_transactions(user_id),
                 synced_at=BASELINE_SYNCED_AT,
             )
         finally:
@@ -187,10 +194,16 @@ def _txn_key(txn) -> str:
 def check_structure() -> list[str]:
     """Assertions the rendered text is blind to. Returns a list of failures."""
     from core.models import DEBT_TYPES
+    from core.users import LOCAL_USER_ID
     from data_source import get_accounts, get_all_transactions
 
-    accounts = get_accounts()
-    transactions = get_all_transactions()
+    # Scoped to the same user the seed uses, so both halves of the gate are
+    # asking about the ids the app actually mints. The invariants below hold
+    # either way -- they are properties of the adapter, not of the owner -- but
+    # a failure message naming a different id than the seed wrote would send a
+    # reader looking for a second bug.
+    accounts = get_accounts(LOCAL_USER_ID)
+    transactions = get_all_transactions(LOCAL_USER_ID)
     failures: list[str] = []
 
     account_ids = {_account_key(a) for a in accounts}

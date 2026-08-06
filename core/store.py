@@ -13,10 +13,17 @@ a balance. It owns the FILE. The translation between rows and model objects
 belongs above it, the same way an adapter owns the translation between a
 provider payload and the model.
 
+It does import `core.migrations`, which in turn reaches `core.models` for
+`make_id`. That is the one edge in this direction and it is deliberate: a
+migration rewrites ROW CONTENT, so it needs the vocabulary this module refuses
+to learn. The dependency stays pointed that way -- migrations knows about the
+model, the model knows nothing about migrations, and this file still never
+touches a merchant or a balance itself.
+
 THE SPLIT BETWEEN THE FOUR FUNCTIONS
     db_path()      -- where the file is
     connect()      -- an open connection with the pragmas set, no schema
-    init_schema()  -- the tables, the meta row, and the version check
+    init_schema()  -- the tables, the meta row, the migrations, the version check
     open_db()      -- both of the above; the one everything should call
 
 `connect` and `init_schema` are separate because a test that wants a schemaless
@@ -31,6 +38,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from core import migrations
+
 #: Bumped whenever the DDL below changes in a way an existing file cannot
 #: satisfy -- a new column, a new CHECK, a renamed table. It is the entire
 #: reason this is not just `CREATE TABLE IF NOT EXISTS` and a shrug:
@@ -41,7 +50,13 @@ from pathlib import Path
 #: first INSERT naming a column that is not there -- or worse, succeed against
 #: a table missing a CHECK we now depend on. The version is the thing that
 #: notices, and it notices at open time rather than mid-sync.
-SCHEMA_VERSION = 6
+#:
+#: SINCE v7 A BUMP IS ALSO A PROMISE. `core/migrations.py` must carry a step for
+#: every version between EARLIEST_SUPPORTED_VERSION and this number, and
+#: `upgrade` refuses to open a file it cannot walk forward rather than skipping
+#: the gap. Bumping this alone now fails loudly instead of orphaning every
+#: existing database. See docs/MIGRATIONS.md.
+SCHEMA_VERSION = 7
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -297,12 +312,17 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_schema(conn: sqlite3.Connection) -> None:
-    """Create the tables if absent, then verify the version.
+def init_schema(conn: sqlite3.Connection) -> list[int]:
+    """Create the tables if absent, migrate an older file, verify the version.
 
     Order matters and is not arbitrary: the DDL runs first so that a brand-new
-    file HAS a meta table to be asked about, and the version check runs second
-    so that an existing file is judged before anything is written to it.
+    file HAS a meta table to be asked about, migrations run second because
+    CREATE TABLE IF NOT EXISTS adds missing tables and changes no existing one,
+    and the version check runs last so that whatever the migrations could not
+    fix is judged before anything is written.
+
+    Returns the versions it migrated THROUGH, so a caller can say so. Empty for
+    a new file and for one already at SCHEMA_VERSION, which is the usual case.
     """
     # Asked BEFORE the DDL runs, because afterwards every database looks like it
     # has always had these tables. This is the only moment the difference
@@ -329,7 +349,23 @@ def init_schema(conn: sqlite3.Connection) -> None:
         )
     conn.commit()
 
+    applied = [] if is_new else migrations.upgrade(
+        conn, SCHEMA_VERSION, file_of(conn)
+    )
+
     _require_supported_version(conn)
+    return applied
+
+
+def file_of(conn: sqlite3.Connection) -> str:
+    """The file THIS connection opened, which is not always `db_path()`.
+
+    `open_db(path)` takes an explicit path, and every error message about a
+    version mismatch has to name the file it is actually about -- naming the
+    configured one instead sends a reader to a database that is fine.
+    """
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return row[2] or "<in-memory>"
 
 
 def _database_is_empty(conn: sqlite3.Connection) -> bool:
@@ -351,19 +387,17 @@ def _database_is_empty(conn: sqlite3.Connection) -> bool:
 def _require_supported_version(conn: sqlite3.Connection) -> None:
     """Refuse a database this code cannot speak to. Both directions.
 
-    OLDER than us means the file is missing whatever the bump was for, and the
-    failure it would otherwise produce is a column-level error mid-sync, three
-    layers from the cause.
+    OLDER than us should be impossible by the time this runs: `init_schema`
+    has already handed the file to `core.migrations`, which either walked it
+    forward or raised. Reaching here still older means a migration returned
+    without doing its job, so this is a bug guard rather than a user message.
 
-    NEWER than us means a later version of this app wrote it. That is the more
-    dangerous one, because the extra columns are invisible to every SELECT we
-    write: the app would read the file happily, render numbers that look fine,
-    and drop whatever the new version added on the next write. Refusing is not
-    caution, it is the only way that data survives.
-
-    There is no migration path yet, on purpose -- writing one before a second
-    version exists means guessing at the shape of a change that has not
-    happened.
+    NEWER than us means a later version of this app wrote it, and that half is
+    unchanged by the arrival of migrations -- there is no migrating backwards.
+    It is the more dangerous direction, because the extra columns are invisible
+    to every SELECT we write: the app would read the file happily, render
+    numbers that look fine, and drop whatever the new version added on the next
+    write. Refusing is not caution, it is the only way that data survives.
     """
     row = conn.execute("SELECT schema_version FROM meta WHERE id = 1").fetchone()
     if row is None:
@@ -376,19 +410,26 @@ def _require_supported_version(conn: sqlite3.Connection) -> None:
             "meta table has no row 1 -- this database has tables but no version "
             "record, so there is no way to tell what shape it is in. Restore "
             "the row if you know the version it was written at; otherwise "
-            "delete the file and re-sync."
+            "delete the file and re-sync. Migrations cannot help here -- they "
+            "start from a version, and this file does not state one."
         )
 
     found = row["schema_version"]
-    if found != SCHEMA_VERSION:
-        direction = "older than" if found < SCHEMA_VERSION else "NEWER than"
+    if found > SCHEMA_VERSION:
         raise RuntimeError(
-            f"database schema version {found} is {direction} this code's "
-            f"{SCHEMA_VERSION} ({db_path()}). There is no migration path yet: "
-            f"delete the file and re-sync. Do NOT delete it if the version is "
-            f"newer -- that file was written by a later version of this app and "
-            f"holds columns this code cannot see, so a re-sync would discard "
-            f"them."
+            f"database schema version {found} is NEWER than this code's "
+            f"{SCHEMA_VERSION} ({file_of(conn)}). That file was written by a "
+            f"later version of this app and holds columns this code cannot "
+            f"see, so opening it read-write would drop them on the next write. "
+            f"Migrations only run forwards. Do NOT delete it -- upgrade the "
+            f"code instead."
+        )
+    if found < SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema version {found} is still older than this code's "
+            f"{SCHEMA_VERSION} ({file_of(conn)}) after migrations ran. That is "
+            f"a bug in core/migrations.py, not a problem with the file: a step "
+            f"reported success without stamping the version it reached."
         )
 
 

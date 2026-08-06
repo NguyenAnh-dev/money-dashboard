@@ -51,20 +51,25 @@ PROVIDER = Provider.FAKE
 CONNECTION_ID = "fixture"
 
 
-def _ref(provider_id: str) -> SourceRef:
+def _ref(provider_id: str, connection_id: str = CONNECTION_ID) -> SourceRef:
     """Provenance for one record of this connection.
 
     `fetched_at` stays None: the fixture is not fetched from anywhere, and a
     timestamp here would be a lie that looks like a fact in a debug dump.
+
+    `connection_id` is an argument rather than a straight read of the constant
+    because one fixture is shared by every user (see docs/USERS.md §6). The
+    constant remains the default, so an adapter built without an owner is
+    exactly what it always was.
     """
     return SourceRef(
         provider=PROVIDER,
         provider_id=provider_id,
-        connection_id=CONNECTION_ID,
+        connection_id=connection_id,
     )
 
 
-def _ns(provider_id: str) -> str:
+def _ns(provider_id: str, connection_id: str = CONNECTION_ID) -> str:
     """Bare provider id -> our namespaced id. "acc_1" -> "fake:fixture:acc_1".
 
     BOTH fetch methods route through this, and that is the entire point. The
@@ -74,7 +79,7 @@ def _ns(provider_id: str) -> str:
     joins -- renders byte-identically. One function means the two sides cannot
     drift, because there is only one spelling of the id to get wrong.
     """
-    return make_id(_ref(provider_id))
+    return make_id(_ref(provider_id, connection_id))
 
 
 def _posts_on(year: int, month: int, anchor_day: int) -> date:
@@ -99,10 +104,18 @@ class FakeSource:
     """The fixture as a source. Same contract every other adapter implements:
     `fetch_accounts()` and `fetch_transactions()`, returning core.models types.
 
-    Stateless, so the constructor takes nothing. Plaid's will take an access
+    Stateless apart from the connection it mints under. Plaid's takes an access
     token and an Item id -- that asymmetry is exactly why the contract is a
     class rather than two module-level functions.
+
+    `connection_id` defaults to the module constant, which is the one every
+    caller used before per-user scoping existed. `sync.py` passes a scoped one
+    (see core.models.scoped_connection_id and docs/USERS.md §6); a bare
+    FakeSource() is unchanged, and remains what the conformance suite builds.
     """
+
+    def __init__(self, connection_id: str = CONNECTION_ID) -> None:
+        self.connection_id = connection_id
 
     def fetch_accounts(self) -> list[Account]:
         """Three accounts at three institutions, one of them a credit card.
@@ -121,8 +134,8 @@ class FakeSource:
         ]
         return [
             Account(
-                id=_ns(provider_id),
-                source=_ref(provider_id),
+                id=_ns(provider_id, self.connection_id),
+                source=_ref(provider_id, self.connection_id),
                 name=name,
                 institution=institution,
                 type=account_type,
@@ -133,7 +146,7 @@ class FakeSource:
         ]
 
     def connection(self) -> ConnectionRef:
-        return ConnectionRef(provider=PROVIDER, connection_id=CONNECTION_ID)
+        return ConnectionRef(provider=PROVIDER, connection_id=self.connection_id)
 
     def fetch_transactions(self, cursor: str | None = None) -> SyncResult:
         """Fake transactions spanning May-July 2026, shaped like a real statement.
@@ -220,7 +233,8 @@ class FakeSource:
             # row must not rekey it.
             provider_id = minter.mint(when.isoformat(), name, amount_cents, account)
             rows.append((provider_id, when, name, merchant, amount_cents,
-                         category, _ns(account), pending, kind))
+                         category, _ns(account, self.connection_id), pending,
+                         kind))
 
         # -----------------------------------------------------------------
         # RECURRING -- these are the signal your detector must find
@@ -342,8 +356,8 @@ class FakeSource:
         rows.sort(key=lambda row: row[1])
         return SyncResult(added=[
             Transaction(
-                id=_ns(provider_id),
-                source=_ref(provider_id),
+                id=_ns(provider_id, self.connection_id),
+                source=_ref(provider_id, self.connection_id),
                 account_id=account_id,
                 date=when,
                 name=name,

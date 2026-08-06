@@ -112,7 +112,8 @@ renders whatever was last synced, so an unpinned gate would compare the baseline
 which may hold live bank data. `_seeded_database()` builds a throwaway database from the
 fixture in a temp directory and syncs it with `BASELINE_SYNCED_AT` fixed, because the footer
 prints `meta.last_synced_at` and an unpinned timestamp would put the wall clock into the
-rendered text. `check_structure()` still reads through `data_source` on purpose: it asks
+rendered text. Since Step 7 it seeds through the **user-scoped** source (`get_accounts(user_id)`),
+so the gate pins the ids `sync.py` actually writes rather than a set no command produces. `check_structure()` still reads through `data_source` on purpose: it asks
 whether the *adapter's* model is intact, which is a question about the source rather than
 about what happens to be stored, and it gives a better message than the foreign-key
 violation the same bug would cause during the seed.
@@ -208,6 +209,9 @@ conventions*.
 - **`data_source.py`** — selector only. Reads `DATA_SOURCE` **per call**, not at import, so
   tests can change it; imports the adapter *inside* the branch so choosing `fake` never
   loads a provider SDK. An unknown value raises rather than falling back to fake.
+  **Takes an optional `user_id` since Step 7**, and passes the adapter a
+  `scoped_connection_id` when one is given — that argument is the whole multi-user fix, and
+  omitting it is the documented inspection path rather than an oversight.
   `get_source()` is **public since 5.7** so a caller can HOLD one adapter and fetch from it
   twice — `get_accounts()` / `get_transactions()` each build their own, which was two
   adapters per sync: two file reads for a CSV, and for Plaid two SDK clients plus a second
@@ -323,6 +327,19 @@ conventions*.
   **read** (`<=`, so an expiry of exactly now has expired); `purge_expired` is separate
   because a resolver that deleted on read would make every page load a write. See
   `docs/AUTH.md`.
+- **`core/migrations.py`** — the forward path between schema versions (Step 7), and the
+  reason `core/store.py` now has one import that reaches `core.models`: a migration
+  rewrites row *content*, so it needs the vocabulary the store refuses to learn. Keyed on
+  the version being migrated **from**, one transaction and one version stamp per step, so
+  an interruption re-opens at the version actually reached. A `SCHEMA_VERSION` bump with no
+  registered step is **refused, not skipped** — skipping would stamp the new version onto a
+  file that never got the change, after which every read works and the first write dies on
+  a missing column. **Foreign keys are OFF while a step runs**, which is not optional when
+  rewriting a primary key the FK points at, and is why `PRAGMA foreign_key_check` runs
+  *inside* the transaction before the version stamp, and why the pragma is restored in a
+  `finally` — it is per connection, and that connection is the one the caller then syncs
+  with. Safe for DML; a future step needing DDL must know that Python's `sqlite3` does not
+  wrap `ALTER TABLE` in the rollback. See `docs/MIGRATIONS.md`.
 - **`core/crypto.py`** — Fernet over `connections.access_token` (Step 6.3), key from
   `ENCRYPTION_KEY`. **Fernet rather than raw AES**: authenticated, picks its own IV, and has
   no mode to choose wrongly — a tampered ciphertext raises instead of decrypting to a
@@ -369,8 +386,11 @@ currency a real ISO code; dates `date` and not `datetime`; and two fetches produ
 identical ids.
 
 The list holds *instances*, not classes, because constructor shapes differ — `FakeSource()`
-takes nothing, `CsvSource()` a path and an account, Plaid's will take an access token — and
-that list is the one place that knows how to build each one.
+takes an optional connection id, `CsvSource()` a path, an account and one of those too,
+Plaid's an access token — and that list is the one place that knows how to build each one.
+It builds every source **unscoped**, which is deliberate: the contract is about the
+translation, not about who owns the rows, and a scoped id would only make each assertion's
+failure message longer.
 
 Two of those assertions are worth knowing about before writing an adapter:
 
@@ -499,23 +519,28 @@ An id is `provider:connection_id:provider_id` with **no user segment**, so two u
 one `connection_id` would mint *identical* account ids and the second sync's upsert would
 overwrite the first user's rows — doing exactly what an upsert is for, on somebody else's
 data. Putting `user_id` in the key would permit that arrangement while leaving the collision
-intact one table over. `ensure_connections` raises instead. **The live consequence: a second
-user cannot sync fake or CSV**, since both hardcode `CONNECTION_ID` (`"fixture"` and
-`"bank_export"`) for everybody; Plaid is exempt because an Item id is already unique per
-enrollment. That is the id namespace correctly reporting that it is not yet multi-user rather
-than a bug in the fixtures — see **Deferred, on purpose** for the two ways out.
+intact one table over. `ensure_connections` raises instead, and that refusal is **unchanged
+by Step 7** — it is still the backstop. What Step 7 changed is that the fixture sources no
+longer *hand* two users the same connection to collide over: `sync.py` builds them with
+`scoped_connection_id`, so a second user's rows sit beside the first's. A hand-built
+cross-user write still raises here, correctly.
 
 ## Project conventions
 
 - This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 were
   **diff-free refactors** — they moved code and had to leave the render byte-identical.
-  Step 5 introduces SQLite, which is why id stability matters now. Step 6 introduces users.
-- **Schema v6** as of Step 6.3 (`connections.access_token`); v5 was 6.1 (`sessions`), v4 was
-  Step 6 (`users`). There is still no migration path — an older database is refused with
-  "delete the file and re-sync", in both directions. That was fine while the database was
-  disposable and **6.3 is where it stops being**: a linked Plaid Item cannot be rebuilt by a
-  re-sync, because re-linking needs a browser and a human. Deleting a v5 file now costs
-  every linked bank.
+  Step 5 introduces SQLite, which is why id stability matters now. Step 6 introduces users;
+  Step 7 makes the id namespace multi-user and adds migrations, which is the step where an
+  existing database stopped being disposable.
+- **Schema v7** as of Step 7 (per-user connection ids, a data rewrite rather than a DDL
+  change); v6 was 6.3 (`connections.access_token`), v5 was 6.1 (`sessions`), v4 was Step 6
+  (`users`). **Step 7 is where "delete the file and re-sync" stopped being the answer** — a
+  linked Plaid Item cannot be rebuilt by a re-sync, because re-linking needs a browser and a
+  human, so from 6.3 that message was asking for something it could not give back. An older
+  file is now migrated forward on open; **v6 is the floor**, declared rather than
+  backfilled, because no database outside this repository was ever written below it and a
+  pre-v6 file cannot hold a linked connection anyway. The refusal for a **newer** file is
+  unchanged and still correct — there is no migrating backwards. See `docs/MIGRATIONS.md`.
 - **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`).
   It was hardcoded through 4.5 so those refactors stayed diff-free; the pin expired at 4.7,
   when a Plaid render put real balances on screen under the word "fake". That is the failure
@@ -594,40 +619,43 @@ than a bug in the fixtures — see **Deferred, on purpose** for the two ways out
   plaintext, which exists only during a login, so it belongs in the login endpoint.
 - **`sync.py` still writes as `LOCAL_USER_ID`, so a signed-up API user's dashboard is
   empty.** There is no `POST /sync`: syncing stays in the CLI, and letting an HTTP request
-  start a network fetch against a bank is a decision with its own failure modes. Syncing *as*
-  a signed-up user needs the id namespace fixed first (`docs/USERS.md` §6). Until then, an
-  empty response for a new account is correct behaviour and the clearest demonstration that
-  the scoping works.
-- **The id namespace is not multi-user, and the fixture sources are where it bites first.**
-  This is the one to resolve before two people use this for real.
+  start a network fetch against a bank is a decision with its own failure modes. **Step 7
+  removed the blocker underneath this and not the feature itself**: the id namespace no
+  longer collides, so a second user *could* now be synced, but the CLI has no way to say who
+  it is syncing as. Until it does, an empty response for a new account is correct behaviour
+  and the clearest demonstration that the scoping works.
+- **The id namespace became multi-user at Step 7, and `make_id` did not change.** The
+  entry that used to sit here described the ceiling; this describes which way out was
+  taken, because the rejected option is still the one somebody will reach for.
 
   `make_id` produces `provider:connection_id:provider_id` with **no user segment**, so a
-  connection id is what separates one person's rows from another's. Two of the three adapters
-  hardcode theirs as a module constant:
+  connection id is what separates one person's rows from another's — and `fake.py` and
+  `csv_source.py` hardcoded theirs (`"fixture"`, `"bank_export"`) as one string for
+  everybody, so the second user to sync minted *identical* account ids and
+  `ensure_connections` refused the write. Plaid never had the problem: an Item id is unique
+  per user per institution by construction.
 
-  | adapter | `CONNECTION_ID` | multi-user? |
-  |---|---|---|
-  | `fake.py` | `"fixture"` | **no** — the same string for everybody |
-  | `csv_source.py` | `"bank_export"` | **no** — same |
-  | `plaid_source.py` | the live Item id | **yes** — unique per enrollment, by construction |
+  **The fix scopes the connection id, not the id format.** `FakeSource` and `CsvSource` take
+  a `connection_id`; `data_source.get_source(user_id)` passes
+  `scoped_connection_id(CONNECTION_ID, user_id)` → `"fixture:<uuid>"`; `sync.py` supplies the
+  user. `make_id` is untouched, ids stay three segments (the `:` escapes to `%3A`), **Plaid
+  is deliberately not scoped** — that would rekey every linked account to buy a property it
+  already has, on the one connection a re-sync cannot rebuild — and only the two sources
+  that had the collision moved. The rejected alternative, a **user segment in `make_id`**,
+  is the more honest fix and rekeys *every row ever minted for every provider*; it stays
+  available if something later justifies that.
 
-  So the second user to sync fake or CSV mints *identical* account ids to the first, and
-  `ensure_connections` refuses the write — correctly, because the alternative is an upsert
-  quietly overwriting somebody else's rows. **Plaid does not have this problem at all**: a
-  Plaid Item id is already unique per user per institution, which is exactly the property the
-  other two lack.
+  **`get_source()` with no user is still unscoped**, and that is the inspection path:
+  `get_accounts()`, a bare `FakeSource()`, and the whole conformance suite produce the ids
+  they always did. Only the sync path scopes. `tests/check_baseline.py` seeds through the
+  **scoped** source on purpose — seeding unscoped would pin a set of ids no command
+  produces, and the gate would keep passing after the sync path started writing others.
 
-  **The practical consequence: the demo is single-user on anything but Plaid.** One person
-  can sign up, sync the fixture, and see their data. The second person to try it gets an
-  error from a constant in an adapter, with no obvious connection to the account they just
-  created. That is the id namespace reporting the truth, not a bug in the fixture — but it
-  is the first thing two people sharing this will hit.
-
-  Two ways out, and neither is small. Mint connection ids **per user** in the sources that
-  hardcode them (contained, but it changes what a fixture *is* — the same file would produce
-  different ids per owner, and `check_baseline.py` pins those ids). Or add a **user segment
-  to `make_id`**, which is the honest fix and **rekeys every row ever minted**. See
-  `docs/USERS.md` §6.
+  Existing databases are handled by the v6→v7 migration, which rekeys the connection, its
+  accounts, and its transactions' `id`/`connection_id`/**`account_id`** in one transaction.
+  That last field is the whole risk: rekey the accounts and leave the children pointing at
+  the old strings and every read's join returns nothing — a dashboard that renders perfectly
+  with no money on it. See `docs/MIGRATIONS.md` §6 and `docs/USERS.md` §6.
 - **`meta.last_synced_at` is global, not per user.** The honest per-user answer is
   `MAX(connections.fetched_at)` for that user, which is already stored — wiring the footer
   to it is a render change with its own baseline diff, so it is deferred rather than
