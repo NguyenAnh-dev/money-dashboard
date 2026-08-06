@@ -1,7 +1,7 @@
 """
 tests/test_auth.py
 ------------------
-Step 6.2: signup, login, sessions. No HTTP -- these are the functions 6.3's
+Step 6.1: signup, login, sessions. No HTTP -- these are the functions 6.2's
 endpoints will call, tested at the level they actually live at.
 
 Nothing here renders, so the baseline gate is unaffected by every line of it.
@@ -145,7 +145,7 @@ def test_signup_normalizes_the_email_before_storing_it(db):
 
 
 def test_a_duplicate_email_is_a_clean_error_not_an_integrity_error(db, ada):
-    """The caller is an HTTP endpoint at 6.3, and it has to tell a user 'that
+    """The caller is an HTTP endpoint at 6.2, and it has to tell a user 'that
     email is taken' without either leaking SQL or catching sqlite3 exceptions
     three layers above the database."""
     with pytest.raises(users.EmailAlreadyRegistered) as caught:
@@ -447,7 +447,7 @@ def test_the_default_lifetime_is_finite(db, ada):
 
 
 # ---------------------------------------------------------------------------
-# Login and session, composed the way 6.3 will compose them
+# Login and session, composed the way 6.2 will compose them
 # ---------------------------------------------------------------------------
 
 def test_the_login_flow_end_to_end(db, ada):
@@ -473,7 +473,7 @@ def test_a_failed_login_never_reaches_a_session(db, ada):
 
 
 def test_a_session_resolves_to_a_user_id_the_repository_can_scope_by(db, ada):
-    """The seam between 6.1 and 6.2: what a session resolves TO is exactly what
+    """The seam between Step 6 and 6.1: what a session resolves TO is exactly what
     every repository function takes as its second argument."""
     from core import repository
 

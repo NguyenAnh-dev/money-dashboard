@@ -1,4 +1,4 @@
-# Step 6.2 — signup, login, sessions
+# Step 6.1 — signup, login, sessions
 
 `426 passed, 1 skipped`, `GATE PASSED`, **render byte-identical**. Nothing here
 appears on screen, which is exactly why it is tested at the function level: an
@@ -7,7 +7,7 @@ auth bug produces no diff, so there is no render that would catch one.
 Schema **v5** — one new table, `sessions`. v4 databases are refused with the
 usual message.
 
-No HTTP. These are the functions 6.3's endpoints will call.
+No HTTP. These are the functions 6.2's endpoints will call.
 
 ---
 
@@ -57,7 +57,7 @@ would pass no matter what `main.py` did.
 
 ### `"!"` stopped being decorative
 
-6.1 wrote `UNUSABLE_PASSWORD_HASH = "!"` on the local user on the argument that
+Step 6 wrote `UNUSABLE_PASSWORD_HASH = "!"` on the local user on the argument that
 no hash function produces it. There was no verifier then, so the claim cost
 nothing. Now there is one, and it holds: argon2 output always begins `$argon2`,
 so nothing verifies against `!`.
@@ -74,7 +74,7 @@ today's hash function.
 Normalizes the email, hashes the password, inserts, returns the id.
 
 **A duplicate email raises `EmailAlreadyRegistered`, not `sqlite3.IntegrityError`.**
-The caller at 6.3 is an HTTP handler that has to say "that email is taken"
+The caller at 6.2 is an HTTP handler that has to say "that email is taken"
 without catching `sqlite3` exceptions three layers above the database. It
 subclasses `ValueError`, and carries `.email`.
 
@@ -130,7 +130,7 @@ Three details:
 
 What this does *not* fix: signup still reveals a registered email by rejecting
 it, which is the ordinary trade every product makes, and rate limiting does not
-exist yet. Both belong to 6.3, where there is a request to attach them to.
+exist yet. Both belong to 6.2, where there is a request to attach them to.
 
 ---
 
@@ -217,7 +217,7 @@ active_sessions(conn, user_id, now=None) -> int
 a session with no expiry is a password that never changes.
 
 **What a session resolves to is exactly what every repository function takes as
-its second argument.** That is the seam between 6.1 and 6.2, and
+its second argument.** That is the seam between Step 6 and 6.1, and
 `test_a_session_resolves_to_a_user_id_the_repository_can_scope_by` states it,
 because it is the whole reason the two steps are in this order.
 
@@ -225,7 +225,7 @@ because it is the whole reason the two steps are in this order.
 
 ## 5. What is deliberately still open
 
-- **No HTTP, no cookies, no CSRF.** 6.3. Whether the token travels as a cookie
+- **No HTTP, no cookies, no CSRF.** 6.2. Whether the token travels as a cookie
   (`HttpOnly`, `Secure`, `SameSite`) or an `Authorization` header is a decision
   that belongs with the transport, and the CSRF question only exists once it is
   a cookie.
@@ -238,7 +238,7 @@ because it is the whole reason the two steps are in this order.
 - **`sync.py` and `main.py` still use `LOCAL_USER_ID` and ignore all of this.**
   The CLI commands have no session and no way to prompt for one. They stay on
   the scaffolding user until there is an HTTP surface that can log in — the
-  ownership plumbing from 6.1 is what makes swapping that a one-line change at
+  ownership plumbing from Step 6 is what makes swapping that a one-line change at
   each call site.
 - **The id namespace is still not multi-user** (`docs/USERS.md` §6). Auth now
   makes it possible to *create* a second real user, which makes that ceiling

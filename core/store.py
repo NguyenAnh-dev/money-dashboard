@@ -41,7 +41,7 @@ from pathlib import Path
 #: first INSERT naming a column that is not there -- or worse, succeed against
 #: a table missing a CHECK we now depend on. The version is the thing that
 #: notices, and it notices at open time rather than mid-sync.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -237,7 +237,14 @@ CREATE TABLE IF NOT EXISTS connections (
     -- SourceRef.fetched_at, at last. One value per fetch, stored once.
     fetched_at      TEXT,
 
+    -- Fernet ciphertext of the provider's access token, or NULL for a source
+    -- that has no such concept -- which is every source except Plaid. NEVER
+    -- the plaintext: this column is the one thing in the file that grants
+    -- live access to somebody's bank.
+    access_token    TEXT,
+
     PRIMARY KEY (provider, connection_id),
+    CHECK (access_token IS NULL OR access_token LIKE 'gAAAAA%'),
     CHECK (provider IN ('fake', 'plaid', 'csv')),
     CHECK (length(connection_id) > 0)
 );

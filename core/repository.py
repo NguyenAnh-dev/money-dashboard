@@ -5,6 +5,7 @@ import sqlite3
 from datetime import date, datetime
 from typing import Any, NamedTuple, Sequence
 
+from core import crypto
 from core.models import (
     Account,
     AccountType,
@@ -298,6 +299,96 @@ def save_connection(
             user_id,
         ),
     )
+
+
+def save_access_token(
+    conn: sqlite3.Connection,
+    user_id: str,
+    connection: ConnectionRef,
+    access_token: str,
+) -> None:
+    ensure_connections(
+        conn,
+        user_id,
+        {(connection.provider.value, connection.connection_id)},
+    )
+    updated = conn.execute(
+        "UPDATE connections SET access_token = ? "
+        "WHERE provider = ? AND connection_id = ? AND user_id = ?",
+        (
+            crypto.encrypt(access_token),
+            connection.provider.value,
+            connection.connection_id,
+            user_id,
+        ),
+    ).rowcount
+
+    if not updated:
+        raise ValueError(
+            f"no connection {connection.provider.value}:"
+            f"{connection.connection_id} for user {user_id}"
+        )
+
+
+def access_token_for(
+    conn: sqlite3.Connection, user_id: str, connection: ConnectionRef
+) -> str | None:
+    row = conn.execute(
+        "SELECT access_token FROM connections "
+        "WHERE provider = ? AND connection_id = ? AND user_id = ?",
+        (connection.provider.value, connection.connection_id, user_id),
+    ).fetchone()
+
+    if row is None or row["access_token"] is None:
+        return None
+    return crypto.decrypt(row["access_token"])
+
+
+def connections_for(
+    conn: sqlite3.Connection, user_id: str
+) -> list[ConnectionRef]:
+    return [
+        ConnectionRef(
+            provider=Provider(row["provider"]),
+            connection_id=row["connection_id"],
+        )
+        for row in conn.execute(
+            "SELECT provider, connection_id FROM connections "
+            "WHERE user_id = ? ORDER BY provider, connection_id",
+            (user_id,),
+        )
+    ]
+
+
+def linked_connections(
+    conn: sqlite3.Connection, user_id: str
+) -> list[tuple[ConnectionRef, str]]:
+    return [
+        (
+            ConnectionRef(
+                provider=Provider(row["provider"]),
+                connection_id=row["connection_id"],
+            ),
+            crypto.decrypt(row["access_token"]),
+        )
+        for row in conn.execute(
+            "SELECT provider, connection_id, access_token FROM connections "
+            "WHERE user_id = ? AND access_token IS NOT NULL "
+            "ORDER BY provider, connection_id",
+            (user_id,),
+        )
+    ]
+
+
+def owner_of(
+    conn: sqlite3.Connection, connection: ConnectionRef
+) -> str | None:
+    row = conn.execute(
+        "SELECT user_id FROM connections "
+        "WHERE provider = ? AND connection_id = ?",
+        (connection.provider.value, connection.connection_id),
+    ).fetchone()
+    return None if row is None else row["user_id"]
 
 
 def cursor_for(

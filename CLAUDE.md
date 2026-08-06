@@ -10,6 +10,7 @@ Use the venv interpreter explicitly — it works identically in PowerShell, cmd,
 ./venv/Scripts/python.exe sync.py                           # fetch and store (fake)
 $env:DATA_SOURCE="csv"; ./venv/Scripts/python.exe sync.py   # store fixtures/bank_export.csv
 ./venv/Scripts/python.exe main.py                           # render what was stored
+./venv/Scripts/python.exe -m uvicorn api.app:app --env-file .env --reload   # serve it; /docs is the UI
 
 ./venv/Scripts/python.exe tests/check_baseline.py           # THE gate — run before every commit
 ./venv/Scripts/python.exe tests/check_baseline.py --update  # rewrite the baseline (deliberate only)
@@ -48,6 +49,48 @@ No linter and no build step.
 Dependencies (`requirements.txt`): `rich` at runtime, `pytest` for tests. Nothing under
 `core/`, `adapters/` or `main.py` may import pytest. Python 3.10+ required (`X | None`
 unions).
+
+## Before this is deployed
+
+Not "deferred" — these are *owed*, and each one is silent when forgotten. This list is
+separate from **Deferred, on purpose** for exactly that reason: a deferred feature is
+absent and obvious, while everything here is a default that works perfectly on a laptop
+and is wrong on a server, with nothing on screen to say so.
+
+- [ ] **`COOKIE_SECURE=1`.** Non-negotiable, and the only item here that is a *security*
+  regression rather than a limitation. The session cookie is `HttpOnly` and `SameSite=Lax`
+  unconditionally, but `Secure` is **off by default** and must be turned on in the
+  deployment environment. Off is correct for local development and wrong everywhere else:
+  a `Secure` cookie is never sent over http, so defaulting it on would make
+  `uvicorn --reload` on localhost look like a broken login — 200 and a cookie, then 401 on
+  every request after, with nothing explaining why. **Nothing in the app will remind you.**
+  Unset, every session token travels in cleartext over any non-https hop, and the failure
+  is invisible: logins work, the dashboard renders, and the credential is on the wire.
+  `test_the_secure_flag_is_configurable_and_defaults_off` pins the default so it cannot
+  change by accident; it cannot pin the deployment.
+- [ ] **`ENCRYPTION_KEY` must be set, and must be BACKED UP** (6.3). Unlike the rest of this
+  list the app does tell you: it refuses to start without one. What it cannot tell you is
+  that **losing the key is unrecoverable** — every stored Plaid token becomes permanently
+  unreadable and every user has to re-link every bank. Back it up separately from the
+  database, because a backup holding both is a backup that has not encrypted anything.
+  There is no rotation command yet.
+- [ ] **Start the server with `--env-file .env`.** uvicorn imports `api.app` as a module, so
+  nothing runs the `load_dotenv()` that `sync.py` and `main.py` do in their `__main__`
+  blocks. Without it `ENCRYPTION_KEY` is absent (loud, the app will not start) and the
+  `PLAID_*` credentials are absent (was silent until 6.3 — it died inside urllib3 with
+  `TypeError: expected string or bytes-like object, got 'NoneType'`, naming neither Plaid nor
+  the variable; `build_client` now says which one is missing and why).
+- [ ] **CORS is unset**, so no browser on another origin can call the API. That is the safe
+  default and it is also a wall: a real frontend on a different host gets opaque failures
+  until it is configured deliberately.
+- [ ] **No rate limiting on `POST /auth/login`.** It is public, and argon2 is as expensive
+  for the server as it is for the attacker — so this is a CPU-exhaustion path as much as a
+  credential-stuffing one.
+- [ ] **No CSRF token.** `SameSite=Lax` covers the cross-site POST case and is not a
+  complete answer.
+- [ ] **`DB_PATH`** — a server started in the wrong directory *creates* an empty database
+  and serves it. `main.py` guards against this and `api/deps.get_db` deliberately does not,
+  because a server has to come up before anything has been synced.
 
 ## The baseline gate
 
@@ -112,6 +155,16 @@ adapters/*  →  core/models  →  core/repository  →  SQLite  →  core/repos
               (selector, DATA_SOURCE  (who owns it)         insights.py → main.py
                per call)                                    (analysis)    (rendering)
 ```
+
+**`sync()` returns a LIST, one entry per connection** (6.3). A user can hold several linked
+institutions, and the path used to assume exactly one — so a second bank was never fetched,
+silently, since the first still synced and the dashboard still rendered.
+`sources_for(conn, user_id)` returns every stored connection **that has an access token**,
+plus the `DATA_SOURCE` adapter unless it is already one of them; a connection without a token
+(fake, CSV) is skipped rather than half-built. Cursors were already per connection since 5.8
+— the loop is what honours that, and handing every Item one cursor would resume one from
+another's position and skip transactions with no error. For the local CLI user, which has no
+linked connections, this is one source and the previous behaviour exactly.
 
 **`sync.py` fetches transactions BEFORE accounts, and that is not a slip.** Two fetches are
 two moments. Accounts-first leaves a gap: a transaction for an account opened between the
@@ -225,7 +278,7 @@ conventions*.
   `find_recurring`, where the provisional amount would fabricate a price change), while a
   transfer is a final amount that was never spending at all. Opposite reasons, so neither
   skip is precedent for the other.
-- **`core/users.py`** — who owns the data (6.1). Mints user ids (**UUIDv4, canonical
+- **`core/users.py`** — who owns the data (Step 6). Mints user ids (**UUIDv4, canonical
   lowercase text**, minted by the app because SQLite has no `uuid()`), normalizes emails,
   and holds the single-user scaffolding: `LOCAL_USER_ID`, a **fixed** constant rather than
   a per-process `uuid4()` — a new id each run would file every sync under a new owner while
@@ -236,7 +289,7 @@ conventions*.
   `main.py` only *reads* the constant, because creating a user as a side effect of a
   read-only command is the same mistake as creating an empty `money.db`. See
   `docs/USERS.md`.
-  **6.2 added signup and login here.** `create_user(conn, email, password)` hashes through
+  **6.1 added signup and login here.** `create_user(conn, email, password)` hashes through
   `core/passwords.py` and raises **`EmailAlreadyRegistered`** rather than letting a raw
   `sqlite3.IntegrityError` reach an HTTP handler — matched narrowly on `"users.email"`, so a
   malformed id or a constraint added later still reports its own cause.
@@ -250,7 +303,7 @@ conventions*.
   "disabled" is distinguishable from "absent"), and a successful lookup does **not** pay
   twice, which would be the same signal reversed. Pinned by **counting** the calls, never by
   timing them.
-- **`core/passwords.py`** — the KDF, and the only module that imports `argon2` (6.2).
+- **`core/passwords.py`** — the KDF, and the only module that imports `argon2` (6.1).
   **Never `hashlib`**: a general-purpose digest is built to be fast, which is the one
   property a password hash must not have. `verify_password` returns `False` rather than
   raising, because argon2 raises `InvalidHashError` on anything it cannot parse — including
@@ -260,7 +313,7 @@ conventions*.
   one constant, and a C extension has no business being loaded to render a table.
   `test_rendering_does_not_import_argon2` pins it in a **subprocess**, since argon2 is
   already imported in the test process.
-- **`core/sessions.py`** — server-side session tokens (6.2), deliberately not JWTs: a JWT
+- **`core/sessions.py`** — server-side session tokens (6.1), deliberately not JWTs: a JWT
   is valid until it expires no matter what the server thinks, so logout degrades to "the
   client agreed to forget it" and "sign me out everywhere" is inexpressible. **The table
   stores a SHA-256 of the token, never the token** — a session token is a bearer credential,
@@ -270,6 +323,37 @@ conventions*.
   **read** (`<=`, so an expiry of exactly now has expired); `purge_expired` is separate
   because a resolver that deleted on read would make every page load a write. See
   `docs/AUTH.md`.
+- **`core/crypto.py`** — Fernet over `connections.access_token` (Step 6.3), key from
+  `ENCRYPTION_KEY`. **Fernet rather than raw AES**: authenticated, picks its own IV, and has
+  no mode to choose wrongly — a tampered ciphertext raises instead of decrypting to a
+  corrupted token that would then be sent to Plaid. Two encryptions of one token differ,
+  which matters beyond correctness: identical ciphertexts would leak *which two users linked
+  the same bank* without either token being readable. The key is read **per call** (the
+  `DB_PATH`/`DATA_SOURCE` rule) while the `Fernet` object is cached against it. **The API
+  refuses to start without the key** via `lifespan`, because checking at first use would let
+  the server come up, serve the dashboard, and fail on somebody's first *link attempt* — the
+  error landing on a user instead of on whoever deployed it. The CLI does **not** require it:
+  `DATA_SOURCE=fake` touches no token, and demanding a key to render the fixture is theatre.
+  **Losing the key is unrecoverable** — every stored token is dead and every account must be
+  re-linked. See `docs/LINK.md`.
+- **`api/`** — the HTTP surface (Step 6.2), and a **projection** of the functions the CLI
+  already renders rather than a second implementation. `deps.current_user_id` is the piece
+  everything hangs off: it reads the session cookie, resolves it, and 401s on missing, junk,
+  expired and logged-out alike — **one body for all four**, because distinguishing "no
+  cookie" from "expired" tells an attacker holding a stolen token whether it was ever valid.
+  The user id is **never a parameter a client can supply**; no query string, header or body
+  field changes whose data comes back.
+  `schemas.py` is a deliberate subset built by explicit `.of()` classmethods: **`source` and
+  `raw` never cross the wire** (a Plaid `raw` is kilobytes of provider payload), money
+  crosses as **integer cents, never formatted**, and `RecurringChargeOut` has to spell out
+  `delta_cents`/`direction` because they are `@property` and **pydantic reads fields** — omit
+  them and the price-change column silently vanishes from the API while the CLI keeps it.
+  `get_db` opens **one connection per request**: sqlite3 connections belong to their creating
+  thread and FastAPI runs sync endpoints in a threadpool. It also *creates* the database if
+  absent, which is right for a server and is the opposite of `main.py`'s rule. The
+  route-coverage test walks the app's own routing table — and must recurse through
+  `_IncludedRouter`, since FastAPI 0.141 does not flatten included routers into `app.routes`.
+  See `docs/API.md`.
 - **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
   through as an argument so the gate can pin it by passing a `Console`, not by patching a
   global.
@@ -372,7 +456,7 @@ Treat this as a known ceiling on CSV id stability, not a bug to solve in the min
 real fix is upstream: a source that supplies its own ids (Plaid does) never reaches this
 code path.
 
-### Users and scoping (6.1, schema v4)
+### Users and scoping (Step 6, schema v4)
 
 **`user_id` appears exactly once in the schema, on `connections`.** Not on `accounts`, not
 on `transactions` — those belong to a connection and a connection belongs to a user, so the
@@ -384,7 +468,7 @@ and then need keeping consistent with the connection it came from: the same deno
 both gained `FOREIGN KEY (provider, connection_id) REFERENCES connections(...)`. Every read
 now joins through `connections` to filter, so an account whose connection row is missing
 joins to nothing and **vanishes from the dashboard while sitting in the file** — no error,
-a net worth quietly missing a bank. Before 6.1 nothing joined, so a missing row cost
+a net worth quietly missing a bank. Before Step 6 nothing joined, so a missing row cost
 nothing; the join is what makes it silent data loss, and the FK is what makes it impossible.
 `save` writes connections **first** for exactly the reason it writes accounts before
 transactions, and derives them from the records' own `SourceRef` so no call site can orphan
@@ -401,25 +485,37 @@ carries no user segment, so unscoped it would delete another user's row and repo
 `repository.last_synced_at` is the one function deliberately left unscoped — `meta` is
 global, and a parameter it ignored would claim filtering that does not happen.
 
+**`connections.access_token` is the one column that grants live access to a bank** (6.3), so
+it is Fernet ciphertext and never plaintext — a `CHECK (… LIKE 'gAAAAA%')` catches the hand
+query that forgets. `repository.save_access_token` / `access_token_for` encrypt and decrypt
+at that boundary and the token crosses no other: not `SourceRef`, not `api/schemas.py`, not
+any response body. `owner_of` is **deliberately unscoped**, the only such function here — its
+whole job is to answer *who already holds this Item* so `/plaid/exchange` can tell "you
+already linked this" (201, new token) from "somebody else did" (409). Scoping it would make
+it useless for the one question it exists to answer; it returns a user id and nothing else.
+
 **A connection belongs to exactly one user, and the PK stays `(provider, connection_id)`.**
 An id is `provider:connection_id:provider_id` with **no user segment**, so two users holding
 one `connection_id` would mint *identical* account ids and the second sync's upsert would
 overwrite the first user's rows — doing exactly what an upsert is for, on somebody else's
 data. Putting `user_id` in the key would permit that arrangement while leaving the collision
 intact one table over. `ensure_connections` raises instead. **The live consequence: a second
-user cannot sync the fake source**, since `CONNECTION_ID` is the constant `"fixture"` for
-everybody. That is the id namespace correctly reporting that it is not yet multi-user, not a
-bug in the fixture.
+user cannot sync fake or CSV**, since both hardcode `CONNECTION_ID` (`"fixture"` and
+`"bank_export"`) for everybody; Plaid is exempt because an Item id is already unique per
+enrollment. That is the id namespace correctly reporting that it is not yet multi-user rather
+than a bug in the fixtures — see **Deferred, on purpose** for the two ways out.
 
 ## Project conventions
 
 - This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 were
   **diff-free refactors** — they moved code and had to leave the render byte-identical.
   Step 5 introduces SQLite, which is why id stability matters now. Step 6 introduces users.
-- **Schema v5** as of 6.2 (`sessions`); v4 was 6.1 (`users`). There is still no migration
-  path — an older database is refused with "delete the file and re-sync", in both
-  directions. Five versions in five steps is fine while the database is disposable; it stops
-  being fine the day it holds something a re-sync cannot rebuild.
+- **Schema v6** as of Step 6.3 (`connections.access_token`); v5 was 6.1 (`sessions`), v4 was
+  Step 6 (`users`). There is still no migration path — an older database is refused with
+  "delete the file and re-sync", in both directions. That was fine while the database was
+  disposable and **6.3 is where it stops being**: a linked Plaid Item cannot be rebuilt by a
+  re-sync, because re-linking needs a browser and a human. Deleting a v5 file now costs
+  every linked bank.
 - **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`).
   It was hardcoded through 4.5 so those refactors stayed diff-free; the pin expired at 4.7,
   when a Plaid render put real balances on screen under the word "fake". That is the failure
@@ -475,21 +571,63 @@ bug in the fixture.
   `repository.superseded_id` deletes it in the same transaction. Keyed on the field, not on
   the provider. Still unsolvable from a CSV, where the information was never exported — see
   the reconciliation entry under **Open questions**.
-- **Authentication exists as of 6.2, but nothing is behind it.** Signup, login and sessions
-  are functions with no caller: `sync.py` and `main.py` are CLI commands with no session and
-  no way to prompt for one, so they still use `LOCAL_USER_ID` and ignore all of it. That is
-  what 6.3's HTTP surface is for, and 6.1's plumbing is what makes swapping it a one-line
-  change per call site. Also still missing, all of it deliberately waiting for a request to
-  attach to: **rate limiting and lockout** (argon2 makes one guess expensive, not a million
-  impossible), **cookie/CSRF decisions**, **password reset and email verification** (both
-  need a mail path this project does not have), and **`needs_rehash` is implemented and
-  never called** — re-hashing needs the plaintext, which exists only during a login, so it
-  belongs with the endpoint that has a response to write it in.
-- **The id namespace is not multi-user**, and this is the one to resolve before two users
-  ever coexist for real. `make_id` has no user segment, so multi-user needs either
-  connection ids minted per user (a Plaid Item id already is; only sources that hardcode one
-  are a problem) or a segment added to `make_id` — which **rekeys every row ever minted**
-  and is a far larger decision than it looks. See `docs/USERS.md` §6.
+- **Deployment-time settings live in *Before this is deployed*, not here** — `COOKIE_SECURE`,
+  CORS, rate limiting, CSRF. They are not deferred features; they are defaults that are
+  correct on a laptop and wrong on a server, which is a different kind of debt and belongs on
+  a checklist somebody actually reads before shipping.
+- **Plaid Link's browser half is not built** (6.3 stopped short of it, deliberately). Link is
+  a JS SDK and a page, so nothing can produce a real `public_token` yet — the endpoints are
+  driven with `/sandbox/public_token/create`, which is how the step was verified end to end.
+  Three things wait on that same frontend: **no unlink** (deleting the row would leave the
+  Item live at Plaid, still authorized and still billable — doing it properly means
+  `/item/remove` and handling a failure *after* the row is gone), **no `ITEM_LOGIN_REQUIRED`
+  handling** (stale bank credentials need Link in update mode), and **no webhooks**, so a
+  removal or a new charge is only seen when a sync runs.
+- **No `ENCRYPTION_KEY` rotation path.** Rotating means decrypting every row with the old key
+  and re-encrypting with the new one in a single transaction, with both keys present.
+  `crypto.decrypt` names the situation when it happens ("either the key was rotated without
+  re-encrypting, or the row was written by a different deployment"); no command fixes it.
+- **Still missing from auth, waiting for a product decision rather than a deployment:**
+  **pagination** on `/transactions` (76 rows from the fixture, unbounded in principle),
+  **password reset and email verification** (both need a mail path this project does not
+  have), and **`needs_rehash` is implemented and never called** — re-hashing needs the
+  plaintext, which exists only during a login, so it belongs in the login endpoint.
+- **`sync.py` still writes as `LOCAL_USER_ID`, so a signed-up API user's dashboard is
+  empty.** There is no `POST /sync`: syncing stays in the CLI, and letting an HTTP request
+  start a network fetch against a bank is a decision with its own failure modes. Syncing *as*
+  a signed-up user needs the id namespace fixed first (`docs/USERS.md` §6). Until then, an
+  empty response for a new account is correct behaviour and the clearest demonstration that
+  the scoping works.
+- **The id namespace is not multi-user, and the fixture sources are where it bites first.**
+  This is the one to resolve before two people use this for real.
+
+  `make_id` produces `provider:connection_id:provider_id` with **no user segment**, so a
+  connection id is what separates one person's rows from another's. Two of the three adapters
+  hardcode theirs as a module constant:
+
+  | adapter | `CONNECTION_ID` | multi-user? |
+  |---|---|---|
+  | `fake.py` | `"fixture"` | **no** — the same string for everybody |
+  | `csv_source.py` | `"bank_export"` | **no** — same |
+  | `plaid_source.py` | the live Item id | **yes** — unique per enrollment, by construction |
+
+  So the second user to sync fake or CSV mints *identical* account ids to the first, and
+  `ensure_connections` refuses the write — correctly, because the alternative is an upsert
+  quietly overwriting somebody else's rows. **Plaid does not have this problem at all**: a
+  Plaid Item id is already unique per user per institution, which is exactly the property the
+  other two lack.
+
+  **The practical consequence: the demo is single-user on anything but Plaid.** One person
+  can sign up, sync the fixture, and see their data. The second person to try it gets an
+  error from a constant in an adapter, with no obvious connection to the account they just
+  created. That is the id namespace reporting the truth, not a bug in the fixture — but it
+  is the first thing two people sharing this will hit.
+
+  Two ways out, and neither is small. Mint connection ids **per user** in the sources that
+  hardcode them (contained, but it changes what a fixture *is* — the same file would produce
+  different ids per owner, and `check_baseline.py` pins those ids). Or add a **user segment
+  to `make_id`**, which is the honest fix and **rekeys every row ever minted**. See
+  `docs/USERS.md` §6.
 - **`meta.last_synced_at` is global, not per user.** The honest per-user answer is
   `MAX(connections.fetched_at)` for that user, which is already stored — wiring the footer
   to it is a render change with its own baseline diff, so it is deferred rather than
@@ -604,7 +742,7 @@ bug in the fixture.
   along the same seam as the modules themselves (`store` owns the file, `repository` owns
   the row↔model translation), not along "5.3 tests" and "5.4 tests". A judgment call for
   5.5, not a fix owed now.
-  **6.1 added `tests/test_users.py` rather than growing that file further**, and the seam is
+  **Step 6 added `tests/test_users.py` rather than growing that file further**, and the seam is
   the same one: it holds what is true of *users and scoping* — what a user id is, and that
   every query filters by one — which is a question about ownership rather than about the
   file or the row translation. `tests/test_store.py` gained only a seeded local user in its

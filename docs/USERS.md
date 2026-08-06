@@ -1,4 +1,4 @@
-# Step 6.1 — `users`, and scoping every query to one
+# Step 6 — `users`, and scoping every query to one
 
 `384 passed, 1 skipped`, `GATE PASSED`, render byte-identical.
 

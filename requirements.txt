@@ -19,7 +19,7 @@ plaid-python==42.0.0
 # .env.example is the committed record of which keys exist.
 python-dotenv==1.2.2
 
-# Password hashing (Step 6.2). RUNTIME, and deliberately NOT hashlib: a
+# Password hashing (Step 6.1). RUNTIME, and deliberately NOT hashlib: a
 # general-purpose hash is built to be fast, which is the one property a
 # password hash must not have. argon2id is the current default recommendation
 # and the library ships sane parameters plus a rehash signal.
@@ -28,6 +28,40 @@ python-dotenv==1.2.2
 # the first dependency here that is not pure Python. Nothing under adapters/
 # imports it; core/passwords.py is the only module that does.
 argon2-cffi==25.1.0
+
+# Fernet, for connections.access_token (Step 6.3). A Plaid access token grants
+# live read access to somebody's bank and does not expire, so it is the one
+# value in the database that must not be readable from the file alone.
+#
+# Fernet rather than raw AES: it is authenticated (AES-128-CBC + HMAC), it
+# picks the IV, and it has no mode to choose wrongly. Already an indirect
+# dependency via argon2-cffi's cffi, but pinned here because we import it.
+cryptography==50.0.0
+
+# The HTTP surface (Step 6.2). RUNTIME, but only for `uvicorn api.app:app` --
+# nothing under core/, adapters/, sync.py or main.py imports any of it, and
+# test_the_cli_does_not_import_fastapi pins that. The CLI keeps working with
+# these uninstalled.
+#
+# pydantic v2 arrives underneath fastapi and is what schemas.py is written
+# against; v1's API is different enough that a snippet for one is wrong for the
+# other.
+fastapi==0.141.1
+
+# The ASGI server. [standard] pulls httptools, uvloop (POSIX only), watchfiles
+# for --reload, and websockets. The plain package would do for serving, but
+# --reload without watchfiles falls back to a stat-polling loop.
+uvicorn[standard]==0.52.1
+
+# What pydantic's EmailStr needs; it is an optional extra, so without it the
+# schemas import raises at startup rather than at the first request. Signup
+# rejecting "not-an-email" with a 422 is worth one small dependency.
+email-validator==2.3.0
+
+# Test-only, and it is fastapi's TestClient that needs it: starlette drives the
+# app in-process through httpx rather than over a socket, so the API suite runs
+# with no server and no port.
+httpx==0.28.1
 
 # Test-only. Kept in the same file rather than a requirements-dev.txt because
 # there is one environment here (./venv) and one person in it; a split would be

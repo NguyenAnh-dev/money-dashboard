@@ -543,6 +543,109 @@ def to_transaction(raw: dict, item_id: str) -> Transaction:
 # I/O
 # ---------------------------------------------------------------------------
 
+#: What Link asks the bank for. `transactions` is the only product this app
+#: reads; asking for more would widen the consent screen for data nothing uses.
+LINK_PRODUCTS = ("transactions",)
+LINK_COUNTRY_CODES = ("US",)
+LINK_CLIENT_NAME = "Money Dashboard"
+LINK_LANGUAGE = "en"
+
+
+def build_client():
+    """The Plaid API client, with no access token involved.
+
+    Imported INSIDE the function, not at module scope. `data_source` already
+    imports this adapter lazily so `DATA_SOURCE=fake` never loads the SDK;
+    deferring one more level means the TRANSLATION half of this file can be
+    imported -- by the conformance tests, by the fixture-backed tests, and by
+    `api/routes/plaid.py` at app startup -- without plaid-python being involved
+    at all.
+
+    Module level rather than a PlaidSource method because the two Link calls
+    need a client BEFORE any access token exists. That is the whole shape of
+    the handshake: /link/token/create and /item/public_token/exchange are
+    Item-lifecycle calls, not reads from an Item.
+    """
+    import plaid
+    from plaid.api import plaid_api
+
+    env = os.environ.get("PLAID_ENV", "sandbox").strip().lower()
+    if env != "sandbox":
+        raise ValueError(
+            f"PLAID_ENV={env!r}: this project only runs against "
+            f"sandbox. Production credentials read real accounts."
+        )
+
+    client_id = os.environ.get("PLAID_CLIENT_ID", "").strip()
+    secret = os.environ.get("PLAID_SECRET", "").strip()
+
+    # Checked here rather than left to the SDK. Unset, these reach urllib3 as
+    # None and die in http.client with "expected string or bytes-like object,
+    # got 'NoneType'" -- a traceback that names neither Plaid nor the variable.
+    # The likeliest cause is a server started without .env: uvicorn imports
+    # api.app as a module, so nothing runs the load_dotenv() that sync.py and
+    # main.py do in their __main__ blocks. Hence the hint.
+    missing = [name for name, value in (
+        ("PLAID_CLIENT_ID", client_id), ("PLAID_SECRET", secret),
+    ) if not value]
+    if missing:
+        raise ValueError(
+            f"{' and '.join(missing)} not set, so no Plaid call can be made. "
+            f"If this is the API, start it with `--env-file .env`: uvicorn "
+            f"imports api.app as a module, so nothing loads .env the way "
+            f"sync.py and main.py do in their __main__ blocks."
+        )
+
+    configuration = plaid.Configuration(
+        host=plaid.Environment.Sandbox,
+        api_key={"clientId": client_id, "secret": secret},
+    )
+    return plaid_api.PlaidApi(plaid.ApiClient(configuration))
+
+
+def create_link_token(client_user_id: str, client=None) -> str:
+    """A short-lived token that authorizes ONE Link session in a browser.
+
+    `client_user_id` is our user id, which is what makes a Link session belong
+    to somebody. It is a UUID rather than an email precisely because it goes
+    to a third party -- see docs/USERS.md §2.
+    """
+    from plaid.model.country_code import CountryCode
+    from plaid.model.link_token_create_request import LinkTokenCreateRequest
+    from plaid.model.link_token_create_request_user import (
+        LinkTokenCreateRequestUser,
+    )
+    from plaid.model.products import Products
+
+    api = client or build_client()
+    response = api.link_token_create(LinkTokenCreateRequest(
+        user=LinkTokenCreateRequestUser(client_user_id=client_user_id),
+        client_name=LINK_CLIENT_NAME,
+        products=[Products(p) for p in LINK_PRODUCTS],
+        country_codes=[CountryCode(c) for c in LINK_COUNTRY_CODES],
+        language=LINK_LANGUAGE,
+    ))
+    return response["link_token"]
+
+
+def exchange_public_token(public_token: str, client=None) -> tuple[str, str]:
+    """Trade Link's one-time public_token for the durable access token.
+
+    Returns `(access_token, item_id)`. The access token does not expire, which
+    is exactly why it is encrypted at rest: it is a standing grant to read
+    somebody's bank until the Item is explicitly removed.
+    """
+    from plaid.model.item_public_token_exchange_request import (
+        ItemPublicTokenExchangeRequest,
+    )
+
+    api = client or build_client()
+    response = api.item_public_token_exchange(
+        ItemPublicTokenExchangeRequest(public_token=public_token)
+    )
+    return response["access_token"], response["item_id"]
+
+
 class PlaidSource:
     """A linked Plaid Item as a source.
 
@@ -600,31 +703,10 @@ class PlaidSource:
     def _api(self):
         """The Plaid client, built on first use.
 
-        Imported INSIDE the method, not at module scope. `data_source` already
-        imports this adapter lazily so `DATA_SOURCE=fake` never loads the SDK;
-        deferring one more level means the TRANSLATION half of this file can be
-        imported -- by the conformance tests, by the fixture-backed tests --
-        without plaid-python being involved at all.
+        See build_client() for why the SDK import is deferred this far.
         """
         if self._client is None:
-            import plaid
-            from plaid.api import plaid_api
-
-            env = os.environ.get("PLAID_ENV", "sandbox").strip().lower()
-            if env != "sandbox":
-                raise ValueError(
-                    f"PLAID_ENV={env!r}: this project only runs against "
-                    f"sandbox. Production credentials read real accounts."
-                )
-
-            configuration = plaid.Configuration(
-                host=plaid.Environment.Sandbox,
-                api_key={
-                    "clientId": os.environ.get("PLAID_CLIENT_ID", "").strip(),
-                    "secret": os.environ.get("PLAID_SECRET", "").strip(),
-                },
-            )
-            self._client = plaid_api.PlaidApi(plaid.ApiClient(configuration))
+            self._client = build_client()
         return self._client
 
     def _connection_id(self) -> str:

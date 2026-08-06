@@ -276,11 +276,13 @@ def test_sync_writes_what_the_source_returned(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "sync.db"))
     monkeypatch.setenv("DATA_SOURCE", "fake")
-    result = sync_module.sync()
+    runs = sync_module.sync()
 
     source = FakeSource()
-    assert result.accounts == len(source.fetch_accounts())
-    assert result.transactions == len(source.fetch_transactions().added)
+    assert len(runs) == 1, "one configured source, no linked connections"
+    assert runs[0].connection.connection_id == "fixture"
+    assert runs[0].result.accounts == len(source.fetch_accounts())
+    assert runs[0].result.transactions == len(source.fetch_transactions().added)
 
 
 def test_main_imports_neither_data_source_nor_any_adapter():

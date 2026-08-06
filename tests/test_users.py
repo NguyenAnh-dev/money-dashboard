@@ -1,7 +1,7 @@
 """
 tests/test_users.py
 -------------------
-Step 6.1: users, and the scoping that is the whole point of it.
+Step 6: users, and the scoping that is the whole point of it.
 
 The suite splits in two. The first half is about the user record itself -- what
 a user id is, what makes an email unique, what the local user's password hash
@@ -271,7 +271,7 @@ SHARED_MERCHANTS = ("Netflix", "Chipotle", "Amazon")
 
 
 def test_a_query_scoped_to_one_user_cannot_return_the_others_rows(db, other):
-    """THE test for 6.1, on the case that hides rather than the case that
+    """THE test for Step 6, on the case that hides rather than the case that
     announces itself.
 
     Both users shop at Netflix, Chipotle and Amazon, so a missing WHERE clause
