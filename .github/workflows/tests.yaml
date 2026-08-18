@@ -4,7 +4,7 @@ on: [push, pull_request] #Whenever push commits, open/update PR
 jobs:
   test: #job's name on Github UI
     runs-on: ubuntu-latest #machine
-  steps:
+    steps:
       #uses run pre-build action
     - uses: actions/checkout@v4 #download repo onto machine
 
