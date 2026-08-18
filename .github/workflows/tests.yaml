@@ -1,0 +1,19 @@
+name: Tests #Github's label I will be reading
+on: [push, pull_request] #Whenever push commits, open/update PR
+
+jobs:
+  test: #job's name on Github UI
+    runs-on: ubuntu-latest #machine
+  steps:
+      #uses run pre-build action
+    - uses: actions/checkout@v4 #download repo onto machine
+
+    - uses: actions/setup-python@v5 #Intall python
+      with:
+        python-version: "3.13"
+      #run executes shell command
+    - run: pip install -r requirements.txt #install pinned dependencies
+
+    - run: pytest
+      env:
+        ENCRYPTION_KEY: ${{ secrets.CI_ENCRYPTION_KEY }} #keep the encryption key secret
