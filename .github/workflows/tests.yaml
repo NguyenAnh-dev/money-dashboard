@@ -17,3 +17,4 @@ jobs:
     - run: pytest
       env:
         ENCRYPTION_KEY: ${{ secrets.CI_ENCRYPTION_KEY }} #keep the encryption key secret
+    - run: python tests/check_baseline.py
