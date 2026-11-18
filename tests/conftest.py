@@ -13,8 +13,8 @@ The key here is FIXED and committed, which is safe precisely because it is
 published: it protects nothing, encrypts only values invented inside a test,
 and never reaches a real database. Do not copy it into .env.
 
-Set rather than overridden -- an ENCRYPTION_KEY already in the environment
-wins, so a developer can run the suite against their own key if they want to.
+Set rather than overridden -- a non-empty ENCRYPTION_KEY already in the
+environment wins (an absent or empty one is replaced, which is what CI sees), so a developer can run the suite against their own key if they want to.
 The tests that are ABOUT a missing or wrong key manage the variable themselves
 via monkeypatch, so they are unaffected by this.
 """
@@ -25,4 +25,5 @@ import os
 
 TEST_ENCRYPTION_KEY = "cCk3_1a3fcbLoWVKkvS_hn6HTbUNBSPLtM1CyGkGkI8="
 
-os.environ.setdefault("ENCRYPTION_KEY", TEST_ENCRYPTION_KEY)
+if not os.environ.get("ENCRYPTION_KEY"):
+    os.environ["ENCRYPTION_KEY"] = TEST_ENCRYPTION_KEY
