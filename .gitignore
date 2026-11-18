@@ -44,3 +44,11 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+# Bank statements are private by default. Keep the reviewed synthetic fixture.
+*.csv
+!/fixtures/bank_export.csv
+
+# SQLite companion files can contain transaction data.
+*-wal
+*-shm
+*-journal

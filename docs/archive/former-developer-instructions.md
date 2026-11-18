@@ -1,0 +1,777 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+Use the venv interpreter explicitly — it works identically in PowerShell, cmd, and Git Bash:
+
+```
+./venv/Scripts/python.exe sync.py                           # fetch and store (fake)
+$env:DATA_SOURCE="csv"; ./venv/Scripts/python.exe sync.py   # store fixtures/bank_export.csv
+./venv/Scripts/python.exe main.py                           # render what was stored
+./venv/Scripts/python.exe -m uvicorn api.app:app --env-file .env --reload   # serve it; /docs is the UI
+
+./venv/Scripts/python.exe tests/check_baseline.py           # THE gate — run before every commit
+./venv/Scripts/python.exe tests/check_baseline.py --update  # rewrite the baseline (deliberate only)
+./venv/Scripts/python.exe -m pytest                         # unit tests
+./venv/Scripts/python.exe -m pytest tests/test_money.py::test_bare_int_is_whole_units -q
+```
+
+**Two test commands, on purpose.** They cover different things and neither replaces the
+other:
+
+- **pytest** (`pytest.ini`, `testpaths = tests`, `python_files = test_*.py`) runs the unit
+  tests: `test_money.py`, `test_csv_source.py` (the two CSV failures a render is blind to —
+  an inverted `SIGN` and an unstable id), and `test_conformance.py` (the adapter contract).
+  Adopted at step 4.3 ahead of need, because the conformance test is natively a
+  `@pytest.mark.parametrize` over adapters and it was not worth learning pytest and
+  designing that contract in the same sitting.
+  `pythonpath = .` in `pytest.ini` is what puts the project root on `sys.path`; without it
+  `import core.money` fails, because pytest only adds `tests/` itself.
+- **`check_baseline.py`** is deliberately **not** collected (its name does not match
+  `python_files`, and it is a script with a `main()` returning an exit code, not a module
+  of `test_` functions). Converting it is churn for no gain today — it works, it is the
+  release gate, and its whole design is about controlling the process it runs in. Run it
+  separately, and treat `GATE PASSED` as the thing that must be true before a commit.
+
+**`check_structure()` duplicates several conformance assertions on purpose.** The gate has
+to keep working as a standalone script in a process it fully controls; importing shared
+assertions from the test suite would couple the release check to the thing it is supposed
+to be independent of. The assertions are four lines each — the independence is worth more
+than the de-duplication. The split: `check_baseline.py` asks *does the configured source
+still render byte-identically, and is its model intact* (fake only, by definition);
+`test_conformance.py` asks *does every adapter honour the contract*, regardless of
+`DATA_SOURCE` and regardless of whether it renders at all.
+
+No linter and no build step.
+
+Dependencies (`requirements.txt`): `rich` at runtime, `pytest` for tests. Nothing under
+`core/`, `adapters/` or `main.py` may import pytest. Python 3.10+ required (`X | None`
+unions).
+
+## Before this is deployed
+
+Not "deferred" — these are *owed*, and each one is silent when forgotten. This list is
+separate from **Deferred, on purpose** for exactly that reason: a deferred feature is
+absent and obvious, while everything here is a default that works perfectly on a laptop
+and is wrong on a server, with nothing on screen to say so.
+
+- [ ] **`COOKIE_SECURE=1`.** Non-negotiable, and the only item here that is a *security*
+  regression rather than a limitation. The session cookie is `HttpOnly` and `SameSite=Lax`
+  unconditionally, but `Secure` is **off by default** and must be turned on in the
+  deployment environment. Off is correct for local development and wrong everywhere else:
+  a `Secure` cookie is never sent over http, so defaulting it on would make
+  `uvicorn --reload` on localhost look like a broken login — 200 and a cookie, then 401 on
+  every request after, with nothing explaining why. **Nothing in the app will remind you.**
+  Unset, every session token travels in cleartext over any non-https hop, and the failure
+  is invisible: logins work, the dashboard renders, and the credential is on the wire.
+  `test_the_secure_flag_is_configurable_and_defaults_off` pins the default so it cannot
+  change by accident; it cannot pin the deployment.
+- [ ] **`ENCRYPTION_KEY` must be set, and must be BACKED UP** (6.3). Unlike the rest of this
+  list the app does tell you: it refuses to start without one. What it cannot tell you is
+  that **losing the key is unrecoverable** — every stored Plaid token becomes permanently
+  unreadable and every user has to re-link every bank. Back it up separately from the
+  database, because a backup holding both is a backup that has not encrypted anything.
+  There is no rotation command yet.
+- [ ] **Start the server with `--env-file .env`.** uvicorn imports `api.app` as a module, so
+  nothing runs the `load_dotenv()` that `sync.py` and `main.py` do in their `__main__`
+  blocks. Without it `ENCRYPTION_KEY` is absent (loud, the app will not start) and the
+  `PLAID_*` credentials are absent (was silent until 6.3 — it died inside urllib3 with
+  `TypeError: expected string or bytes-like object, got 'NoneType'`, naming neither Plaid nor
+  the variable; `build_client` now says which one is missing and why).
+- [ ] **CORS is unset**, so no browser on another origin can call the API. That is the safe
+  default and it is also a wall: a real frontend on a different host gets opaque failures
+  until it is configured deliberately.
+- [ ] **No rate limiting on `POST /auth/login`.** It is public, and argon2 is as expensive
+  for the server as it is for the attacker — so this is a CPU-exhaustion path as much as a
+  credential-stuffing one.
+- [ ] **No CSRF token.** `SameSite=Lax` covers the cross-site POST case and is not a
+  complete answer.
+- [ ] **`DB_PATH`** — a server started in the wrong directory *creates* an empty database
+  and serves it. `main.py` guards against this and `api/deps.get_db` deliberately does not,
+  because a server has to come up before anything has been synced.
+
+## The baseline gate
+
+`check_baseline.py` runs two independent checks, and both must pass (`GATE PASSED`):
+
+- **RENDER** — the dashboard must byte-match `tests/baseline/dashboard.txt`.
+- **STRUCTURE** — invariants the rendered text is blind to: ids unique, every
+  `Transaction.account_id` resolves to an `Account.id`, amounts are `int`, merchants
+  non-empty, debt accounts non-positive.
+
+STRUCTURE exists because the dashboard **never joins a transaction to its account**.
+Namespacing account ids while leaving `transaction.account_id` bare renders a
+byte-identical screen on a completely broken model. Never assume a passing render means
+the model is intact.
+
+**`DB_PATH` became a fourth pin at 5.6, and the gate is unsound without it.** `main.py` now
+renders whatever was last synced, so an unpinned gate would compare the baseline against the
+*user's* `money.db` — a file whose contents depend on when somebody last ran `sync.py`, and
+which may hold live bank data. `_seeded_database()` builds a throwaway database from the
+fixture in a temp directory and syncs it with `BASELINE_SYNCED_AT` fixed, because the footer
+prints `meta.last_synced_at` and an unpinned timestamp would put the wall clock into the
+rendered text. Since Step 7 it seeds through the **user-scoped** source (`get_accounts(user_id)`),
+so the gate pins the ids `sync.py` actually writes rather than a set no command produces. `check_structure()` still reads through `data_source` on purpose: it asks
+whether the *adapter's* model is intact, which is a question about the source rather than
+about what happens to be stored, and it gives a better message than the foreign-key
+violation the same bug would cause during the seed.
+
+Determinism is achieved by rendering in-process through a `Console` with `file=StringIO`,
+`width=80`, `legacy_windows=False`, `no_color=True` — pinning encoding, width, and colour.
+Do **not** replace this with `main.py > file` + `diff`: `rich` picks ASCII vs Unicode box
+characters from the *output encoding* (Windows cp1252 redirect → ASCII, Linux → Unicode),
+subtracts a column on Windows, and PowerShell's `diff` is `Compare-Object`. See
+`tests/baseline/README.md` for the full rationale, including the trailing-whitespace and
+`.gitattributes` (`-text`) traps that can silently rewrite the baseline.
+
+That pins the encoding on the way **in**. The gate also reconfigures `sys.stdout` **and
+`sys.stderr`** to `utf-8, errors="replace"` at import, which is the same trap arriving on
+the way **out**: the failure diff echoes the rendered dashboard, it is full of `│` and
+`━`, and Windows stdout is cp1252 — so until 4.8 a failing gate printed `RENDER FAIL` and
+then died of `UnicodeEncodeError` before showing a single line of what changed. The check
+was right; only its report was unprintable. `stderr` is included because adapter errors
+interpolate row content into their messages (`_clean_currency` reports the bad code,
+`'ÉUR'`), so without it a failure on a non-ASCII value dies on the error *about* the
+failure. It is `hasattr`-guarded — `reconfigure` is a `TextIOWrapper` method and is absent
+when something has already replaced the stream (pytest capture). Do not "simplify" this
+away, and do not reach for `PYTHONIOENCODING=utf-8`; that was the workaround it replaced.
+
+Only run `--update` on a change that predicted its own render diff in advance.
+
+## Architecture
+
+Data flows strictly one direction, and the layering is the point:
+
+```
+  sync.py                                   main.py
+  (fetch + store)                           (read + render)
+      │                                         │
+      ↓                                         ↓
+adapters/*  →  core/models  →  core/repository  →  SQLite  →  core/repository
+(translate)    (vocabulary)    (model → row)      (money.db)   (row → model)
+                    ↑                     ↑                        │
+              data_source.py         core/users.py                 ↓
+              (selector, DATA_SOURCE  (who owns it)         insights.py → main.py
+               per call)                                    (analysis)    (rendering)
+```
+
+**`sync()` returns a LIST, one entry per connection** (6.3). A user can hold several linked
+institutions, and the path used to assume exactly one — so a second bank was never fetched,
+silently, since the first still synced and the dashboard still rendered.
+`sources_for(conn, user_id)` returns every stored connection **that has an access token**,
+plus the `DATA_SOURCE` adapter unless it is already one of them; a connection without a token
+(fake, CSV) is skipped rather than half-built. Cursors were already per connection since 5.8
+— the loop is what honours that, and handing every Item one cursor would resume one from
+another's position and skip transactions with no error. For the local CLI user, which has no
+linked connections, this is one source and the previous behaviour exactly.
+
+**`sync.py` fetches transactions BEFORE accounts, and that is not a slip.** Two fetches are
+two moments. Accounts-first leaves a gap: a transaction for an account opened between the
+calls references an account missing from the list we hold, and the foreign key rejects the
+whole sync — correct, and baffling. Transactions-first makes the account snapshot the
+*later* one, so every account a transaction could reference is already in it. Holding one
+adapter narrows that window; the ordering removes the failure.
+`test_sync_fetches_transactions_before_accounts` pins it, because it reads as an accident
+and invites being "tidied" back. Note this is the *fetch* order —
+`repository.save` still *writes* accounts first, for the same FK, and the two are
+independent.
+
+**Two commands, and rendering never touches the network** (Step 5.1). `sync.py`
+is the only entry point that loads an adapter, needs credentials, or can be made
+slow by a bank. `main.py` imports neither `data_source` nor any adapter —
+`test_main_imports_neither_data_source_nor_any_adapter` pins that structurally,
+by AST rather than by text, because main.py's comments discuss `data_source` at
+length.
+
+The cost of the split, accepted deliberately: **a stale database renders exactly
+as confidently as a fresh one**. That is what `meta.last_synced_at` and the
+footer's `last synced` line exist to answer, and why the header reads its source
+name from the stored rows rather than from `DATA_SOURCE` — see *Project
+conventions*.
+
+- **`core/models.py`** — the app's own vocabulary. **No third-party imports, ever**; the
+  moment `plaid` or `requests` appears there the model describes a vendor instead of the
+  domain. Invariants enforced in `__post_init__`: money is integer minor units (never
+  float — `_require_int_cents` rejects floats and bools), **positive = money left the
+  account**, ids are namespaced by provider, `merchant` is never empty.
+  `TransactionKind` (4.8) says *what a transaction is* as opposed to what it bought, and
+  it exists because `category` is a **display string each source spells differently** —
+  the fixture writes "Transfer", Plaid "Transfer In"/"Transfer Out", a CSV
+  "Uncategorized", so keying behaviour off that string works on one source and silently
+  fails on the other two. Analysis reads the enum, never the text. It **defaults to
+  `PURCHASE`**, which is what lets a source that cannot classify neither break nor guess
+  while every consumer still reads a non-null value on every row.
+- **`core/money.py`** — the single place amounts get formatted (and, later, parsed). Handles
+  per-currency minor units (JPY 0, KWD 3). Deliberately no thousands separators — adding
+  them moves the baseline.
+- **`data_source.py`** — selector only. Reads `DATA_SOURCE` **per call**, not at import, so
+  tests can change it; imports the adapter *inside* the branch so choosing `fake` never
+  loads a provider SDK. An unknown value raises rather than falling back to fake.
+  **Takes an optional `user_id` since Step 7**, and passes the adapter a
+  `scoped_connection_id` when one is given — that argument is the whole multi-user fix, and
+  omitting it is the documented inspection path rather than an oversight.
+  `get_source()` is **public since 5.7** so a caller can HOLD one adapter and fetch from it
+  twice — `get_accounts()` / `get_transactions()` each build their own, which was two
+  adapters per sync: two file reads for a CSV, and for Plaid two SDK clients plus a second
+  `/item/get`, since `PlaidSource` caches `_client` and `_item_id` **on the instance**. Those
+  two functions are unchanged and remain the convenience path for anything wanting one list.
+- **`adapters/`** — each source translates its records into `core.models`. `fake.py` is the
+  reference implementation of the contract: a class with `fetch_accounts()` /
+  `fetch_transactions()`, plus module-level `PROVIDER` and `CONNECTION_ID` constants that
+  feed every id it mints.
+  **`fetch_transactions()` returns a `SyncResult` since 5.7**, not a flat list —
+  `added` / `modified` / `removed` / `cursor`. `removed` holds **ids, not objects**: a row
+  the source dropped is gone, so there is nothing left to build one from. Fake and CSV put
+  everything in `added` with `cursor=None`, which is honest rather than lazy — both hand
+  back complete current state every fetch and genuinely cannot detect a removal. Plaid
+  passes through what `/transactions/sync` returns, mapping `removed` into **our** id space
+  (a bare `transaction_id` would match no stored row). The cursor is **returned but not
+  applied** — resuming is 5.8, and applying it would have broken 5.7's zero-render-diff
+  condition. See `docs/SYNC_RESULT.md`. Nothing above this layer learns where data came from.
+  Each adapter sets `kind`: the fixture tags its Amex payments `TRANSFER` and payroll
+  `INCOME`; Plaid maps a `KINDS` dict keyed on the **raw**
+  `personal_finance_category.primary` constants (`TRANSFER_IN`/`TRANSFER_OUT`/
+  `LOAN_PAYMENTS` → `TRANSFER`, `INCOME`, `BANK_FEES` → `FEE`), never on the display
+  strings `category_of` produces; CSV writes `PURCHASE` for every row, which is a **known
+  limitation, not a stub** — a three-column export has no counterparty and no knowledge of
+  any other account, so a transfer is genuinely unknowable from the file, and
+  pattern-matching descriptors would trade a visible overcount for an invisible undercount
+  (a false positive *removes* real spending from the totals).
+  `csv_source.py` adds the crosswalk pattern every future bank copies — `COLUMNS`, `SIGN`,
+  `DATE_FORMAT`, `CURRENCY` as named constants at the top of the file. **`SIGN = -1` is the
+  most dangerous line in the codebase**: the export writes debits negative (OFX
+  convention), our model writes them positive, and an inverted flip has *no visible
+  symptom* — every number still formats, every total still ties, and spending and income
+  have swapped places. It has its own test for that reason. A CSV supplies no category
+  (everything is `Uncategorized`), no balance (`CsvAccount.balance_cents` defaults to 0 —
+  summing the rows would give the period's net change while looking exactly like a
+  balance), and no account identity, which is why that is constructor-supplied.
+  `plaid_source.py` is **split in two on purpose**: `to_account` / `to_transaction` are
+  module-level functions over plain dicts (no network, no SDK, no credentials), and
+  `PlaidSource` is the I/O around them. Every invariant the contract checks is a property
+  of the translation, so that split is what lets `fixtures/plaid_sandbox.json` enforce the
+  whole contract on every run. Its traps, all found in the recorded payload rather than the
+  docs: amounts arrive as **floats** (`_to_cents` goes via `str()`, never `int(x*100)`);
+  `merchant_name` is **null on half the rows**, so the raw name falls through
+  `adapters/merchant.py`; and a 401k balance carries **four decimal places**, which is why
+  `_balance_to_cents` rounds while `_to_cents` refuses to — a balance is a snapshot that
+  already moved, a transaction amount is what somebody was charged.
+- **`adapters/merchant.py`** — the shared descriptor → merchant normalizer, moved out of
+  `csv_source.py` at 4.7 when Plaid needed the same fallback. Adapters must not import each
+  other, and its error message no longer names a CSV column.
+- **`insights.py`** — pure analysis over model types. `find_recurring` is charges-only by
+  design (skips `amount_cents < 0`, so payroll is excluded) and requires ≥3 distinct
+  (year, month) pairs, exactly one charge per month, and every gap within 26–35 days.
+  It also **skips `pending`** — a decision, not an oversight. A pending charge's amount is
+  provisional (tip adjustments, fuel holds, FX), so a pending row compared against its own
+  settled history manufactures a price change, which is the one thing this detector exists
+  to report. A subscription is worth detecting one month late; a fabricated "your price
+  went up" alert is worth nothing. Pending rows still count everywhere else — spending
+  totals, the recent list, the transaction count — because the money is committed even
+  when the number is not final.
+  Both `find_recurring` and `spending_by_category` **skip `TransactionKind.TRANSFER`**
+  (4.8). A card payment moves money between two accounts the user owns: the purchases were
+  already counted when they posted, so counting the payment too puts money that was never
+  spent into a table that claims to show spending, and a payment that varies month to month
+  satisfies every rule the detector has while producing a meaningless price-rise alert.
+  **The transfer/pending asymmetry is deliberate**: a transfer is excluded from spending, a
+  pending row is included. The rule is whether the money is *real*, not whether the number
+  is *final* — pending is committed money at a provisional amount (excluded only from
+  `find_recurring`, where the provisional amount would fabricate a price change), while a
+  transfer is a final amount that was never spending at all. Opposite reasons, so neither
+  skip is precedent for the other.
+- **`core/users.py`** — who owns the data (Step 6). Mints user ids (**UUIDv4, canonical
+  lowercase text**, minted by the app because SQLite has no `uuid()`), normalizes emails,
+  and holds the single-user scaffolding: `LOCAL_USER_ID`, a **fixed** constant rather than
+  a per-process `uuid4()` — a new id each run would file every sync under a new owner while
+  `main.py`, which looks rows up by the constant, reported "No data yet" against a full
+  database. Its `password_hash` is `UNUSABLE_PASSWORD_HASH = "!"`, the Unix convention for
+  a disabled password and a string no hash function produces, so the row cannot be
+  authenticated against once a verifier exists. `sync.py` calls `ensure_local_user`;
+  `main.py` only *reads* the constant, because creating a user as a side effect of a
+  read-only command is the same mistake as creating an empty `money.db`. See
+  `docs/USERS.md`.
+  **6.1 added signup and login here.** `create_user(conn, email, password)` hashes through
+  `core/passwords.py` and raises **`EmailAlreadyRegistered`** rather than letting a raw
+  `sqlite3.IntegrityError` reach an HTTP handler — matched narrowly on `"users.email"`, so a
+  malformed id or a constraint added later still reports its own cause.
+  `create_user_with_hash` is the same write taking a ready-made hash: it is how the local
+  user gets `"!"`, a value `hash_password` would never produce, and how tests that are not
+  about hashing avoid paying ~50 ms a user.
+  **`authenticate` runs a throwaway verification when the email is unknown**, and that is
+  not decoration. argon2 is slow by design, so an early return makes an unknown email tens
+  of milliseconds faster than a known one with a wrong password — an oracle for *is this
+  person a customer of yours*. A row with an unusable hash wastes one too (otherwise
+  "disabled" is distinguishable from "absent"), and a successful lookup does **not** pay
+  twice, which would be the same signal reversed. Pinned by **counting** the calls, never by
+  timing them.
+- **`core/passwords.py`** — the KDF, and the only module that imports `argon2` (6.1).
+  **Never `hashlib`**: a general-purpose digest is built to be fast, which is the one
+  property a password hash must not have. `verify_password` returns `False` rather than
+  raising, because argon2 raises `InvalidHashError` on anything it cannot parse — including
+  the local user's `"!"` — and letting that propagate turns a disabled account into a 500
+  instead of a failed login. **The `argon2` import is lazy** (`passwords.hasher()`), for the
+  reason `requirements.txt` gives about the Plaid SDK: `main.py` reaches `core.users` for
+  one constant, and a C extension has no business being loaded to render a table.
+  `test_rendering_does_not_import_argon2` pins it in a **subprocess**, since argon2 is
+  already imported in the test process.
+- **`core/sessions.py`** — server-side session tokens (6.1), deliberately not JWTs: a JWT
+  is valid until it expires no matter what the server thinks, so logout degrades to "the
+  client agreed to forget it" and "sign me out everywhere" is inexpressible. **The table
+  stores a SHA-256 of the token, never the token** — a session token is a bearer credential,
+  so a leaked database would otherwise hand over every live session directly, and rotating
+  passwords would not help. A fast hash is correct here precisely because a password hash
+  must be slow: 32 random bytes have no dictionary to run against them. Expiry is checked on
+  **read** (`<=`, so an expiry of exactly now has expired); `purge_expired` is separate
+  because a resolver that deleted on read would make every page load a write. See
+  `docs/AUTH.md`.
+- **`core/migrations.py`** — the forward path between schema versions (Step 7), and the
+  reason `core/store.py` now has one import that reaches `core.models`: a migration
+  rewrites row *content*, so it needs the vocabulary the store refuses to learn. Keyed on
+  the version being migrated **from**, one transaction and one version stamp per step, so
+  an interruption re-opens at the version actually reached. A `SCHEMA_VERSION` bump with no
+  registered step is **refused, not skipped** — skipping would stamp the new version onto a
+  file that never got the change, after which every read works and the first write dies on
+  a missing column. **Foreign keys are OFF while a step runs**, which is not optional when
+  rewriting a primary key the FK points at, and is why `PRAGMA foreign_key_check` runs
+  *inside* the transaction before the version stamp, and why the pragma is restored in a
+  `finally` — it is per connection, and that connection is the one the caller then syncs
+  with. Safe for DML; a future step needing DDL must know that Python's `sqlite3` does not
+  wrap `ALTER TABLE` in the rollback. See `docs/MIGRATIONS.md`.
+- **`core/crypto.py`** — Fernet over `connections.access_token` (Step 6.3), key from
+  `ENCRYPTION_KEY`. **Fernet rather than raw AES**: authenticated, picks its own IV, and has
+  no mode to choose wrongly — a tampered ciphertext raises instead of decrypting to a
+  corrupted token that would then be sent to Plaid. Two encryptions of one token differ,
+  which matters beyond correctness: identical ciphertexts would leak *which two users linked
+  the same bank* without either token being readable. The key is read **per call** (the
+  `DB_PATH`/`DATA_SOURCE` rule) while the `Fernet` object is cached against it. **The API
+  refuses to start without the key** via `lifespan`, because checking at first use would let
+  the server come up, serve the dashboard, and fail on somebody's first *link attempt* — the
+  error landing on a user instead of on whoever deployed it. The CLI does **not** require it:
+  `DATA_SOURCE=fake` touches no token, and demanding a key to render the fixture is theatre.
+  **Losing the key is unrecoverable** — every stored token is dead and every account must be
+  re-linked. See `docs/LINK.md`.
+- **`api/`** — the HTTP surface (Step 6.2), and a **projection** of the functions the CLI
+  already renders rather than a second implementation. `deps.current_user_id` is the piece
+  everything hangs off: it reads the session cookie, resolves it, and 401s on missing, junk,
+  expired and logged-out alike — **one body for all four**, because distinguishing "no
+  cookie" from "expired" tells an attacker holding a stolen token whether it was ever valid.
+  The user id is **never a parameter a client can supply**; no query string, header or body
+  field changes whose data comes back.
+  `schemas.py` is a deliberate subset built by explicit `.of()` classmethods: **`source` and
+  `raw` never cross the wire** (a Plaid `raw` is kilobytes of provider payload), money
+  crosses as **integer cents, never formatted**, and `RecurringChargeOut` has to spell out
+  `delta_cents`/`direction` because they are `@property` and **pydantic reads fields** — omit
+  them and the price-change column silently vanishes from the API while the CLI keeps it.
+  `get_db` opens **one connection per request**: sqlite3 connections belong to their creating
+  thread and FastAPI runs sync endpoints in a threadpool. It also *creates* the database if
+  absent, which is right for a server and is the opposite of `main.py`'s rule. The
+  route-coverage test walks the app's own routing table — and must recurse through
+  `_IncludedRouter`, since FastAPI 0.141 does not flatten included routers into `app.routes`.
+  See `docs/API.md`.
+- **`main.py`** — rendering only. **No module-level `console`**: the target is threaded
+  through as an argument so the gate can pin it by passing a `Console`, not by patching a
+  global.
+
+### Adding a provider
+
+`tests/test_conformance.py` is what "adding a provider" now means. It holds `ALL_SOURCES`
+and parametrizes the entire contract over it, so a new adapter inherits the full suite by
+adding **one entry** to that list — ids
+namespaced, unique and reconstructible from their own `SourceRef`; every
+`Transaction.account_id` resolving; amounts `int`; merchants non-empty; debt non-positive;
+currency a real ISO code; dates `date` and not `datetime`; and two fetches producing
+identical ids.
+
+The list holds *instances*, not classes, because constructor shapes differ — `FakeSource()`
+takes an optional connection id, `CsvSource()` a path, an account and one of those too,
+Plaid's an access token — and that list is the one place that knows how to build each one.
+It builds every source **unscoped**, which is deliberate: the contract is about the
+translation, not about who owns the rows, and a scoped id would only make each assertion's
+failure message longer.
+
+Two of those assertions are worth knowing about before writing an adapter:
+
+- **`test_ids_are_exactly_what_make_id_produces`** rebuilds each id from the record's own
+  `SourceRef` rather than picking the string apart. That is stricter than a prefix check:
+  it catches an adapter minting a plausible-looking id under the wrong connection.
+- **`test_the_source_list_covers_every_provider_that_has_an_adapter`** asserts that *no*
+  `Provider` is missing from `ALL_SOURCES`. It named `PLAID` as the one exemption until 4.7;
+  that exemption is spent, so a new enum member now fails here until it is registered.
+
+**Plaid broke the "one entry" promise, and the reason is worth knowing.** `FakeSource` and
+`CsvSource` are pure — same input, same output, no setup. `PlaidSource` needs credentials,
+a network and a token from a multi-step handshake, so it cannot simply be constructed in a
+list. It participates as **two** entries instead:
+
+- `RecordedPlaidSource` drives the real `to_account` / `to_transaction` from
+  `fixtures/plaid_sandbox.json`. No credentials, no network, runs everywhere. **This is the
+  one that enforces the contract**, because every assertion is about the translation rather
+  than the connection.
+- The live `PlaidSource` runs in a separate test that **skips when credentials are absent**,
+  catching only what a recording cannot: the I/O half drifting from the translation half.
+  Note pytest deliberately does **not** load `.env`, so this skips even when `.env` is
+  populated — otherwise every test run would hit the network.
+
+A skipped test reads as green, which is why Plaid does not participate by skipping alone.
+
+**The Plaid sandbox is a poor test of `find_recurring`, and it is worth knowing before
+reading anything into a Plaid render.** Sandbox data is generated from a MONTHLY TEMPLATE:
+the 48 transactions are 16 distinct (merchant, amount) pairs repeated exactly three times,
+one per month, on ~30-day gaps. So almost every eligible merchant satisfies the detector by
+construction — 8 of the 9 flagged, the only rejection being Uber, and only because it bills
+twice a month rather than once. Four of them sit at exactly $500.00.
+
+Two consequences. A high detection count there means the generator repeats itself, not that
+the detector works. And **no amount ever varies**, so `previous_cents` is always `None`,
+the Change column is always empty, and the price-change path — the whole reason
+`find_recurring` reaches back past `amounts[-2]` — is never exercised at all. The fake
+fixture is the detector's real test, deliberately: it carries the varying T-Mobile bill, the
+Netflix rise, and the Chipotle-at-a-constant-$14.42 trap. Judge detector changes there.
+
+**Re-recording the fixture** (`scripts/get_plaid_token.py --record-only`) churns the whole
+file: sandbox regenerates data per Item with dates relative to the recording date. Record
+against the token already in `.env` — minting again returns a token for a *different* Item,
+and the fixture would then describe accounts that token cannot reach.
+
+The module pins **both** `DATA_SOURCE` and `CSV_PATH` before importing adapters. It builds
+sources directly rather than through `data_source`, so the env var has no say — but a test
+whose meaning depends on the shell it ran in is worse than no test. `CSV_PATH` is the one
+that actually bites: `CsvSource()` falls back to a *relative* path, so without the pin a
+bare `CsvSource()` only works when pytest is invoked from the project root.
+
+### IDs
+
+Every id is `provider:connection_id:provider_id`, built by `core.models.make_id`, with
+segments percent-escaped (`%` first, then `:`) so concatenation stays injective; empty
+segments raise. **Never parse an id** — read provenance from the `SourceRef` instead.
+Keep it case-sensitive when it becomes a SQLite primary key (`COLLATE NOCASE` would merge
+distinct records).
+
+Sources that supply no id of their own (CSV, the fixture) mint one from row *content* via
+`adapters/fingerprint.py` — never from row position, which would rekey everything below an
+inserted row. Hash the **raw descriptor**, not the normalized merchant: improving the
+merchant cleaner must not move historical ids. Changing `DIGEST_CHARS` rekeys every row
+ever minted.
+
+**The duplicate-row limit.** Two rows with identical content — same date, descriptor,
+amount, account, which is two coffees on one morning, not an error — hash identically,
+because the source recorded nothing that tells them apart. `ContentIdMinter` folds an
+occurrence number into the second and later copies, so the ids are unique and stable *as
+long as the export is*. What that buys and what it does not:
+
+- **Safe:** re-exporting with the duplicates in a different order. They are identical, so
+  permuting them yields the same set of ids. Inserting unrelated rows anywhere is also
+  safe — only the new row gets a new id.
+- **Not safe:** the *count* of duplicates changing. Drop one of three identical charges (a
+  refund, a corrected export) and the survivors renumber, so at Step 5 the upsert rewrites
+  rows instead of removing one.
+- **Arbitrary either way:** which real-world charge is occurrence #0 versus #1. If a user
+  attaches a note or category override to one of them, a re-import can land it on the
+  other. Nothing can fix this from the file alone — the information was never exported.
+
+Treat this as a known ceiling on CSV id stability, not a bug to solve in the minter. The
+real fix is upstream: a source that supplies its own ids (Plaid does) never reaches this
+code path.
+
+### Users and scoping (Step 6, schema v4)
+
+**`user_id` appears exactly once in the schema, on `connections`.** Not on `accounts`, not
+on `transactions` — those belong to a connection and a connection belongs to a user, so the
+chain carries the answer. Copying it onto every row would write one value 76 times per sync
+and then need keeping consistent with the connection it came from: the same denormalization
+`fetched_at` was moved *out* of those tables to stop at 5.8.
+
+**The chain is a foreign key, and that was not optional.** `accounts` and `transactions`
+both gained `FOREIGN KEY (provider, connection_id) REFERENCES connections(...)`. Every read
+now joins through `connections` to filter, so an account whose connection row is missing
+joins to nothing and **vanishes from the dashboard while sitting in the file** — no error,
+a net worth quietly missing a bank. Before Step 6 nothing joined, so a missing row cost
+nothing; the join is what makes it silent data loss, and the FK is what makes it impossible.
+`save` writes connections **first** for exactly the reason it writes accounts before
+transactions, and derives them from the records' own `SourceRef` so no call site can orphan
+an account by omitting the optional `ConnectionRef`.
+
+**Every repository function takes `user_id` as a required positional argument** —
+`load_transactions(conn, user_id)`, `save(conn, user_id, accounts, transactions)`. No
+default, and the two defaults that were rejected are why: `LOCAL_USER_ID` would make a
+forgotten argument work perfectly until there are two users and then return the wrong
+person's money, and `None` meaning "everything" would make it a silent full-table read.
+Required makes both an immediate `TypeError`. **Deletes are scoped by the same join**, which
+is load-bearing rather than tidy: `DELETE ... WHERE id = ?` needs only an id, and an id
+carries no user segment, so unscoped it would delete another user's row and report success.
+`repository.last_synced_at` is the one function deliberately left unscoped — `meta` is
+global, and a parameter it ignored would claim filtering that does not happen.
+
+**`connections.access_token` is the one column that grants live access to a bank** (6.3), so
+it is Fernet ciphertext and never plaintext — a `CHECK (… LIKE 'gAAAAA%')` catches the hand
+query that forgets. `repository.save_access_token` / `access_token_for` encrypt and decrypt
+at that boundary and the token crosses no other: not `SourceRef`, not `api/schemas.py`, not
+any response body. `owner_of` is **deliberately unscoped**, the only such function here — its
+whole job is to answer *who already holds this Item* so `/plaid/exchange` can tell "you
+already linked this" (201, new token) from "somebody else did" (409). Scoping it would make
+it useless for the one question it exists to answer; it returns a user id and nothing else.
+
+**A connection belongs to exactly one user, and the PK stays `(provider, connection_id)`.**
+An id is `provider:connection_id:provider_id` with **no user segment**, so two users holding
+one `connection_id` would mint *identical* account ids and the second sync's upsert would
+overwrite the first user's rows — doing exactly what an upsert is for, on somebody else's
+data. Putting `user_id` in the key would permit that arrangement while leaving the collision
+intact one table over. `ensure_connections` raises instead, and that refusal is **unchanged
+by Step 7** — it is still the backstop. What Step 7 changed is that the fixture sources no
+longer *hand* two users the same connection to collide over: `sync.py` builds them with
+`scoped_connection_id`, so a second user's rows sit beside the first's. A hand-built
+cross-user write still raises here, correctly.
+
+## Project conventions
+
+- This is a staged learning project ("Step 4.1", "Step 5", …). Steps 4.1–4.5 were
+  **diff-free refactors** — they moved code and had to leave the render byte-identical.
+  Step 5 introduces SQLite, which is why id stability matters now. Step 6 introduces users;
+  Step 7 makes the id namespace multi-user and adds migrations, which is the step where an
+  existing database stopped being disposable.
+- **Schema v7** as of Step 7 (per-user connection ids, a data rewrite rather than a DDL
+  change); v6 was 6.3 (`connections.access_token`), v5 was 6.1 (`sessions`), v4 was Step 6
+  (`users`). **Step 7 is where "delete the file and re-sync" stopped being the answer** — a
+  linked Plaid Item cannot be rebuilt by a re-sync, because re-linking needs a browser and a
+  human, so from 6.3 that message was asking for something it could not give back. An older
+  file is now migrated forward on open; **v6 is the floor**, declared rather than
+  backfilled, because no database outside this repository was ever written below it and a
+  pre-v6 file cannot hold a linked connection anyway. The refusal for a **newer** file is
+  unchanged and still correct — there is no migrating backwards. See `docs/MIGRATIONS.md`.
+- **The header reports the active source** (`v0.1 - fake data` / `csv data` / `plaid data`).
+  It was hardcoded through 4.5 so those refactors stayed diff-free; the pin expired at 4.7,
+  when a Plaid render put real balances on screen under the word "fake". That is the failure
+  `_get_source`'s error message argues against, pointed the other way — claiming one thing
+  while showing another.
+  **At 5.6 the source of that string changed**, and the reason is worth knowing:
+  `active_source_name()` reads `DATA_SOURCE`, which after the sync/render split describes
+  what the *next fetch* would get, not what the screen is *showing*. So
+  `DATA_SOURCE=plaid python main.py` against a fixture-synced database labelled fake data
+  "plaid" — the 4.7 lie again, through a door that only opened when the two commands
+  separated. `main.source_label()` now reads `SELECT DISTINCT provider FROM accounts`, so
+  provenance comes from the rows. It **joins** multiple providers (`csv, fake data`) rather
+  than picking one, because a database can legitimately hold two sources and naming the most
+  recent would mislabel the rest. `active_source_name()` survives, correctly, in `sync.py` —
+  same function, opposite verdict, because that command genuinely is about what is about to
+  be fetched.
+- **The footer's `last synced` line is deliberately absolute, never relative.** "3 days ago"
+  is what a person wants to read and cannot be baselined: the stored timestamp is fixed
+  while `now` moves, so the gate would pass on the day it was recorded and fail every day
+  after. A gate that expires is worse than a less friendly footer.
+- **An empty database gets its own screen**, not four empty tables and a $0.00 net worth —
+  that reads as a broken dashboard rather than an unsynced one, and it is the first thing a
+  new user hits. `main.py` checks the file exists **before** calling `store.open_db()`, which
+  would otherwise *create* it: an empty `money.db` in whatever directory the command ran
+  from, rendering "no data" forever while the real database sits elsewhere. The screen prints
+  the path it looked at, because a misdirected `DB_PATH` produces an identical screen.
+- Comments here explain *why*, often at length, and frequently name the specific bug a
+  line prevents. Match that register when editing; don't strip it as verbose.
+- The fixture in `adapters/fake.py` has traps baked in on purpose (Chipotle at a constant
+  $14.42 on varying days; Amazon descriptors with per-order codes that defeat naive string
+  grouping; Uber trips vs Uber Eats). Don't "clean" them up.
+- **The recurring table has FOUR rows as of 4.8, and it had five before.** The monthly Amex
+  card payment is a *transfer* between two accounts the user owns; through 4.7 the model had
+  no way to say so, so it satisfied every rule the detector has — monthly, one charge per
+  month, gaps of 31 and 32 days — and produced three visible defects: a fifth "subscription",
+  $1634.49 of double-counted spending outranking Groceries as the top category, and a
+  meaningless `+$242.39` price-rise alert on a card payment. All three came from one missing
+  fact, and `kind=TransactionKind.TRANSFER` supplies it. **The row itself stays** — it is
+  still in the transaction count (76) and still in the recent list, because the payment did
+  happen, and it is the only row proving the skip works end to end. Deleting it discards the
+  demonstration rather than fixing anything.
+- `docs/DATA_MODEL.md` is referenced from several files but does not exist yet.
+
+## Deferred, on purpose
+
+- **Pending → posted reconciliation: DONE at 5.8, and only half of it needed solving.**
+  Our content-hash ids deliberately exclude `pending` (see `adapters/fake.py`'s `add()`), so
+  a row that only flips its flag keeps its id and the upsert updates it in place — that half
+  never needed code. The other half, a settling charge whose **amount or date moves** (a tip
+  added, an authorization posting a day later), rehashes to a new id and would insert a
+  second row beside the stale pending one. 5.8 fixes that wherever the source *states* the
+  link: `raw["pending_transaction_id"]` names the row being replaced, and
+  `repository.superseded_id` deletes it in the same transaction. Keyed on the field, not on
+  the provider. Still unsolvable from a CSV, where the information was never exported — see
+  the reconciliation entry under **Open questions**.
+- **Deployment-time settings live in *Before this is deployed*, not here** — `COOKIE_SECURE`,
+  CORS, rate limiting, CSRF. They are not deferred features; they are defaults that are
+  correct on a laptop and wrong on a server, which is a different kind of debt and belongs on
+  a checklist somebody actually reads before shipping.
+- **Plaid Link's browser half is not built** (6.3 stopped short of it, deliberately). Link is
+  a JS SDK and a page, so nothing can produce a real `public_token` yet — the endpoints are
+  driven with `/sandbox/public_token/create`, which is how the step was verified end to end.
+  Three things wait on that same frontend: **no unlink** (deleting the row would leave the
+  Item live at Plaid, still authorized and still billable — doing it properly means
+  `/item/remove` and handling a failure *after* the row is gone), **no `ITEM_LOGIN_REQUIRED`
+  handling** (stale bank credentials need Link in update mode), and **no webhooks**, so a
+  removal or a new charge is only seen when a sync runs.
+- **No `ENCRYPTION_KEY` rotation path.** Rotating means decrypting every row with the old key
+  and re-encrypting with the new one in a single transaction, with both keys present.
+  `crypto.decrypt` names the situation when it happens ("either the key was rotated without
+  re-encrypting, or the row was written by a different deployment"); no command fixes it.
+- **Still missing from auth, waiting for a product decision rather than a deployment:**
+  **pagination** on `/transactions` (76 rows from the fixture, unbounded in principle),
+  **password reset and email verification** (both need a mail path this project does not
+  have), and **`needs_rehash` is implemented and never called** — re-hashing needs the
+  plaintext, which exists only during a login, so it belongs in the login endpoint.
+- **`sync.py` still writes as `LOCAL_USER_ID`, so a signed-up API user's dashboard is
+  empty.** There is no `POST /sync`: syncing stays in the CLI, and letting an HTTP request
+  start a network fetch against a bank is a decision with its own failure modes. **Step 7
+  removed the blocker underneath this and not the feature itself**: the id namespace no
+  longer collides, so a second user *could* now be synced, but the CLI has no way to say who
+  it is syncing as. Until it does, an empty response for a new account is correct behaviour
+  and the clearest demonstration that the scoping works.
+- **The id namespace became multi-user at Step 7, and `make_id` did not change.** The
+  entry that used to sit here described the ceiling; this describes which way out was
+  taken, because the rejected option is still the one somebody will reach for.
+
+  `make_id` produces `provider:connection_id:provider_id` with **no user segment**, so a
+  connection id is what separates one person's rows from another's — and `fake.py` and
+  `csv_source.py` hardcoded theirs (`"fixture"`, `"bank_export"`) as one string for
+  everybody, so the second user to sync minted *identical* account ids and
+  `ensure_connections` refused the write. Plaid never had the problem: an Item id is unique
+  per user per institution by construction.
+
+  **The fix scopes the connection id, not the id format.** `FakeSource` and `CsvSource` take
+  a `connection_id`; `data_source.get_source(user_id)` passes
+  `scoped_connection_id(CONNECTION_ID, user_id)` → `"fixture:<uuid>"`; `sync.py` supplies the
+  user. `make_id` is untouched, ids stay three segments (the `:` escapes to `%3A`), **Plaid
+  is deliberately not scoped** — that would rekey every linked account to buy a property it
+  already has, on the one connection a re-sync cannot rebuild — and only the two sources
+  that had the collision moved. The rejected alternative, a **user segment in `make_id`**,
+  is the more honest fix and rekeys *every row ever minted for every provider*; it stays
+  available if something later justifies that.
+
+  **`get_source()` with no user is still unscoped**, and that is the inspection path:
+  `get_accounts()`, a bare `FakeSource()`, and the whole conformance suite produce the ids
+  they always did. Only the sync path scopes. `tests/check_baseline.py` seeds through the
+  **scoped** source on purpose — seeding unscoped would pin a set of ids no command
+  produces, and the gate would keep passing after the sync path started writing others.
+
+  Existing databases are handled by the v6→v7 migration, which rekeys the connection, its
+  accounts, and its transactions' `id`/`connection_id`/**`account_id`** in one transaction.
+  That last field is the whole risk: rekey the accounts and leave the children pointing at
+  the old strings and every read's join returns nothing — a dashboard that renders perfectly
+  with no money on it. See `docs/MIGRATIONS.md` §6 and `docs/USERS.md` §6.
+- **`meta.last_synced_at` is global, not per user.** The honest per-user answer is
+  `MAX(connections.fetched_at)` for that user, which is already stored — wiring the footer
+  to it is a render change with its own baseline diff, so it is deferred rather than
+  overlooked.
+- **`Account.institution` is hardcoded to `"Plaid"`** for every Plaid account, so a Plaid
+  render reports "3 institutions" as 1 and the net-worth panel's "across all banks" is
+  aspirational. The real name needs a second API call (`/institutions/get_by_id` off
+  `item.institution_id`), which buys a footer line in exchange for another network round
+  trip and another failure mode. Deliberately not taken: it is *cosmetically* wrong, not
+  *dishonestly* wrong — nothing claims the name is real, unlike the header did.
+- **The `pending` skip in `find_recurring` is currently unenforced.** The fixture's only
+  pending row is a Starbucks, which `find_recurring` already rejects for having 15 charges
+  across 3 months — so deleting `if txn.pending: continue` changes no output and no test
+  fails. Making it bite needs a pending charge on an otherwise-clean monthly subscription,
+  asserted in a unit test rather than through the render. Worth doing before anyone trusts
+  the rule. Contrast the `TRANSFER` skip added beside it, which *is* enforced: the fixture's
+  Amex payment would be reported as a subscription without it, and
+  `test_no_transfer_ever_reaches_the_recurring_table` states that over the detector's
+  output rather than by re-checking the `continue`.
+- **A pending charge that differs from its settled history should raise an alert, and does
+  not yet.** The trigger: a pending charge from a merchant `find_recurring` already
+  identified, whose amount differs from that merchant's most recent settled charge. Any
+  direction — a subscription that quietly dropped is as worth knowing as one that rose.
+
+  **The guard is the whole feature**: fire only when the last **three** settled charges are
+  identical. Without it the alert lands on merchants that vary by design — the fixture's
+  T-Mobile bill, a card payment that is a different number every month — and an alert that
+  fires constantly is one people stop reading. A merchant with no settled history is
+  skipped rather than guessed at; there is nothing to compare against.
+
+  **Derived, never stored.** Computed fresh on every render from the pending rows plus
+  settled history, which is what keeps it free of lifecycle bugs: when the charge settles,
+  5.8's reconciliation deletes the pending row and the alert disappears with it — no
+  cleanup path to write and no stale alert to expire. If it settled at the new amount,
+  `find_recurring` reports it as a real price change on the next run, through the existing
+  `previous_cents` path.
+
+  Deferred because it is three things at once, none of them free: detection logic that
+  belongs beside `find_recurring`, a render diff, and a decision about where on the screen
+  it appears. It is also **untestable end to end against the Plaid sandbox, which has no
+  pending transactions at all** — building it means first adding a deliberate pending
+  charge to the fake fixture whose amount differs from its settled history. Note that
+  fixture does not have one today: its only pending row is the Starbucks, which
+  `find_recurring` rejects anyway (see the `pending` skip entry above).
+- **Plaid's `LOAN_PAYMENTS → TRANSFER` is a judgment call, and the one mapping that will
+  get a bug report.** The visible symptom, stated up front because someone will ask: **a
+  mortgage or car payment disappears from Spending by Category.** That is intended.
+
+  What makes it defensible is what the bucket contains. Plaid files
+  `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` under this primary, so it is dominated by card
+  payments — exactly the Amex double-count `TRANSFER` exists to stop. In the recorded
+  payload it is 100% card payments and zero mortgages.
+
+  A mortgage is the genuinely contested case and *is* different from a card payment: the
+  principal is net-worth-neutral (asset down, liability down together), but the **interest
+  is a real expense** — money that leaves and never returns, no different from a fee. Plaid
+  sends one amount with no amortization split, so the two cannot be separated. One bucket
+  or nothing.
+
+  We chose `TRANSFER`, and **not** because principal usually dominates — early in a mortgage
+  term the opposite is true. The reason is which error costs more: `PURCHASE` restores the
+  card-payment double-count for the *majority* of the bucket and inflates the spending table
+  for everyone, while `TRANSFER` understates spending only for someone paying a loan we
+  cannot see, and only by its interest portion.
+
+  The escape hatch exists and is deliberately unused: `detailed` separates
+  `_MORTGAGE_PAYMENT` / `_CAR_PAYMENT` / `_STUDENT_LOAN_PAYMENT` from
+  `_CREDIT_CARD_PAYMENT`, so this one primary can be keyed on `detailed` when it matters. It
+  buys nothing today and still would not fix the real gap — the interest belongs in spending
+  and no field says how much of the amount it is.
+
+## Open questions (Step 5)
+
+- **Deletion policy: SETTLED at 5.8 — hard delete, on an explicit signal only.**
+  `SyncResult.removed` carries ids the source states it no longer has, and `repository.save`
+  deletes those rows inside the same transaction as the write. Hard, not a superseded flag:
+  a ghost row would need filtering in `find_recurring`, `spending_by_category`, the recent
+  list and the count — four places to forget, each failing silently by counting money that
+  is gone.
+  What makes it safe is that it is never *inferred*. "Delete anything not in this fetch"
+  remains catastrophic against a rolling window, so a source that cannot detect removal
+  reports `removed=[]` and never deletes; `test_a_complete_state_source_reports_nothing_removed`
+  holds fake and CSV to that.
+  **A removal matching zero rows is counted, not shrugged at.** `DELETE ... WHERE id = ?`
+  against a nonexistent id succeeds silently, which is the failure the 5.7 id mapping
+  exists to prevent — so `delete_transactions` checks existence first and `sync.py` warns on
+  `unmatched`. Reported rather than raised: a provider can legitimately withdraw a charge
+  that arrived and vanished between two syncs, and aborting would break a sync for a benign
+  reason. The existence check is chunked (`DELETE_CHUNK`) because SQLite caps host
+  parameters per statement. See `docs/DELETION.md`.
+
+- **Pending → settled reconciliation: SETTLED at 5.8, for sources that state the link.**
+  A settled transaction naming `raw["pending_transaction_id"]` causes the row it replaces to
+  be deleted in the same transaction. Keyed on the **field's presence, not the provider** —
+  any source adopting the convention inherits it, and fake and CSV need nothing because
+  their ids survive settlement (the content hash excludes `pending`), so the upsert already
+  updates in place. The prior id is mapped through `make_id` for the same reason `removed`
+  is: the raw provider id would match nothing, silently.
+  Two deliberate asymmetries: a self-naming row is skipped (it would delete what it just
+  wrote), and a **missing pending twin is NOT reported as unmatched** — a charge that posts
+  between two syncs is only ever seen settled, so missing is the common case, and folding it
+  into the warning would train everyone to ignore the warning that matters. That is why
+  `delete_transactions` is called twice rather than on one concatenated list.
+  **Still open: the amount-drift case.** A charge whose amount or date moves on settling
+  rehashes to a new id and inserts a second row beside the stale pending one. Solved for
+  Plaid, which states the link; unsolvable from a CSV, where the information was never
+  exported. A ceiling on file-based sources, matching the duplicate-row limit under **IDs**.
+
+- **`tests/test_store.py` covers `core/repository.py` too.** Fine at 5.4, where the read
+  path does not exist and the file is mostly the schema invariants that 5.3 verified by
+  hand. If the 5.5 read path grows enough to need real coverage, split it — the split is
+  along the same seam as the modules themselves (`store` owns the file, `repository` owns
+  the row↔model translation), not along "5.3 tests" and "5.4 tests". A judgment call for
+  5.5, not a fix owed now.
+  **Step 6 added `tests/test_users.py` rather than growing that file further**, and the seam is
+  the same one: it holds what is true of *users and scoping* — what a user id is, and that
+  every query filters by one — which is a question about ownership rather than about the
+  file or the row translation. `tests/test_store.py` gained only a seeded local user in its
+  `db` fixture and the `USER` argument at every call site.
