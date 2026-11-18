@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Next assignment: Task 1a, the offline test startup failure.** Step 1 (baseline investigation) is accepted. After 1a, fix the CSV account-selection workflow. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Next assignment: Task 2a, explicit CSV import account selection.** Step 1 (baseline investigation) and Task 1a (offline test startup) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -8,7 +8,7 @@ Runtime results below come from [Claude’s baseline report, sections 2, 4 and 6
 
 | Priority | Evidence and consequence |
 | --- | --- |
-| 1. Installation and startup | Claude installed the manifest on Python 3.13.14, ran the local CLI, and reported **557 passed, 1 skipped, 1 warning** plus a passing render and structure gate. The API started with a disposable key and refused startup without one, as designed. The reproduced blocker is narrower: an explicitly empty encryption key breaks offline API tests. CI injects a secret and test bootstrap only handles an absent variable. Hosted CI status is unknown. [Workflow](../.github/workflows/tests.yaml) · [Test bootstrap](../tests/conftest.py) · [API startup](../api/app.py) |
+| 1. Installation and startup | Claude installed the manifest on Python 3.13.14, ran the local CLI, and reported **557 passed, 1 skipped, 1 warning** plus a passing render and structure gate. The API started with a disposable key and refused startup without one, as designed. At baseline, CI injected a secret, the test bootstrap only handled an absent variable, and an explicitly empty encryption key broke offline API tests. Task 1a fixed that blocker. [Workflow](../.github/workflows/tests.yaml) · [Test bootstrap](../tests/conftest.py) · [API startup](../api/app.py) |
 | 2. Core workflow | Importing the sample twice left 19 distinct transaction IDs. The CLI nevertheless reported 19 writes on each run. Importing a second card’s statement produced 22 transactions under one account. The selector supplies one CSV connection per user and the repository returns the input count. This establishes incorrect account attribution and ambiguous reporting. [Selector](../data_source.py) · [CSV adapter](../adapters/csv_source.py) · [Repository](../core/repository.py) |
 | 3. Security and data integrity | Account selection and atomic import are the immediate local data concerns. Source review also found that multi-connection sync commits per connection while its exception message claims the entire database is unchanged. That failure path was not exercised in the baseline. The local tests used synthetic data and skipped live Plaid. No credential incident was reported. [Sync loop and CLI reporting](../sync.py) · [Save transaction boundary](../core/repository.py) |
 | 4. Missing first-release behavior | The existing monthly heuristic detected the fixture’s Hulu increase. It groups by merchant across accounts. The schema and dashboard lack persistent tracking decisions, acknowledged increase warnings, and renewal estimates. [Detector](../insights.py) · [Schema](../core/store.py) · [Dashboard](../main.py) |
@@ -32,6 +32,7 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Remove the pytest job’s secret injection. Supply a disposable test key in test bootstrap when the variable is absent or empty. Keep application startup validation intact.
 - **Accept when** the full offline suite can start in either environment, and the existing missing-key startup test still observes the application’s refusal.
 - **Verify** with two fresh pytest processes, one with the variable removed and one explicitly empty. Run `python tests/check_baseline.py` separately. Record results and the intentional live-test skip. [Startup regression test](../tests/test_plaid_link.py)
+- **Accepted.** Commit `2463532` removed the CI secret injection and supplied the disposable test key for both absent and empty values. Codex independently ran the full suite in two fresh Python 3.13.14 processes, one with `ENCRYPTION_KEY` removed and one with it explicitly empty. Each run reported **557 passed, 1 skipped, 1 warning**, including a pass for the missing-key startup regression test. Both runs intentionally skipped live Plaid with credentials removed and reported the existing Starlette deprecation warning. The separate render and structure gate and `git diff --check` passed. Hosted CI was outside this verification.
 
 ### 2a. Give a CSV import an explicit destination account
 
@@ -112,4 +113,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Owner to Claude: “Implement Task 1a only. You may edit the test bootstrap and CI workflow and run the specified local checks. Return the diff and results for Codex review.” Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 2a awaits the owner’s assignment. Once assigned, Claude implements Task 2a only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.

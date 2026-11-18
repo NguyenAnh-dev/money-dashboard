@@ -2,7 +2,9 @@ import os
 
 from rich.console import Console
 from rich.table import Table
+from rich.markup import escape
 from rich.panel import Panel
+from rich.text import Text
 
 from core import repository, store, users
 from core.money import format_money as dollars
@@ -24,7 +26,7 @@ def show_accounts(accounts, console):
 
     for a in accounts:
         style = "red" if a.balance_cents < 0 else "green"
-        table.add_row(a.institution, a.name,
+        table.add_row(escape(a.institution), Text(a.name),
                       f"[{style}]{dollars(a.balance_cents)}[/{style}]")
 
     console.print(table)
