@@ -678,3 +678,93 @@ def test_oversized_whole_amount_is_rejected_with_its_row_before_database(db_file
     err = capsys.readouterr().err
     assert "line 3" in err and "outside the supported range" in err
     assert not db_file.exists()
+
+
+def summary(capsys):
+    out = capsys.readouterr().out
+    new = [l for l in out.splitlines() if l.startswith("  new")]
+    stored = [l for l in out.splitlines() if l.startswith("  stored")]
+    return new, stored
+
+
+def test_first_and_repeat_import_report_new_and_stored_counts(db_file, capsys):
+    assert import_csv.main([str(SAMPLE), "--account", "A", "--yes"]) == 0
+    new, stored = summary(capsys)
+    assert new == ["  new       19 transactions"]
+    assert stored[0].startswith("  stored    0 ")
+    sql = ("SELECT COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents END), 0), "
+           "COALESCE(SUM(CASE WHEN amount_cents < 0 THEN -amount_cents END), 0) "
+           "FROM transactions")
+    assert rows(db_file, sql) == [(257334, 230000)]
+    before = rows(db_file, "SELECT id FROM transactions ORDER BY id")
+    assert len(before) == 19
+
+    assert import_csv.main([str(SAMPLE), "--account", "A", "--yes"]) == 0
+    new, stored = summary(capsys)
+    assert new == ["  new       0 transactions"]
+    assert stored[0].startswith("  stored    19 ")
+    assert rows(db_file, "SELECT id FROM transactions ORDER BY id") == before
+
+
+def test_overlapping_statement_adds_only_the_new_charge(db_file, tmp_path, capsys, monkeypatch):
+    for key in [k for k in os.environ if k.startswith("PLAID")]:
+        monkeypatch.delenv(key)
+    assert import_csv.main([str(SAMPLE), "--account", "A", "--yes"]) == 0
+    capsys.readouterr()
+    sql = "SELECT id, name, amount_cents FROM transactions ORDER BY id"
+    before = rows(db_file, sql)
+    assert len(before) == 19
+
+    lines = SAMPLE.read_text(encoding="utf-8-sig").splitlines()
+    omitted = lines[1]
+    assert "SAFEWAY" in omitted
+    partial = tmp_path / "partial.csv"
+    body = "\n".join(lines[:1] + lines[2:])
+    partial.write_text(body + "\n12/31/2026,UNIQUE NEW MERCHANT,-7.77\n",
+                       encoding="utf-8")
+    assert import_csv.main([str(partial), "--account", "A", "--yes"]) == 0
+    new, stored = summary(capsys)
+
+    assert new == ["  new       1 transactions"]
+    assert stored[0].startswith("  stored    18 ")
+    after = rows(db_file, sql)
+    assert len(after) == 20
+    assert set(before) < set(after)
+    added = set(after) - set(before)
+    assert [(n, c) for _, n, c in added] == [("UNIQUE NEW MERCHANT", 777)]
+    assert any("SAFEWAY" in n for _, n, _ in after)
+
+
+def test_same_sample_in_second_account_is_all_new_with_disjoint_ids(
+        db_file, capsys, monkeypatch):
+    for key in [k for k in os.environ if k.startswith("PLAID")]:
+        monkeypatch.delenv(key)
+    assert import_csv.main([str(SAMPLE), "--account", "A", "--yes"]) == 0
+    capsys.readouterr()
+    assert import_csv.main([str(SAMPLE), "--account", "B", "--yes"]) == 0
+    new, stored = summary(capsys)
+
+    assert new == ["  new       19 transactions"]
+    assert stored[0].startswith("  stored    0 ")
+    assert counts(db_file) == {"A": 19, "B": 19}
+    ids = {}
+    for name in ("A", "B"):
+        ids[name] = {r[0] for r in rows(
+            db_file,
+            "SELECT t.id FROM transactions t JOIN accounts a "
+            f"ON a.id = t.account_id WHERE a.name = '{name}'")}
+        assert len(ids[name]) == 19
+    assert ids["A"].isdisjoint(ids["B"])
+
+
+def test_identical_same_day_rows_count_as_two_new_then_two_stored(db_file, tmp_path, capsys):
+    path = write(tmp_path, "Date,Description,Amount\n01/05/2026,TWIN,-5.00\n01/05/2026,TWIN,-5.00\n")
+    assert import_csv.main([str(path), "--account", "A", "--yes"]) == 0
+    new, stored = summary(capsys)
+    assert new == ["  new       2 transactions"] and stored[0].startswith("  stored    0 ")
+    assert rows(db_file, "SELECT COUNT(*) FROM transactions") == [(2,)]
+
+    assert import_csv.main([str(path), "--account", "A", "--yes"]) == 0
+    new, stored = summary(capsys)
+    assert new == ["  new       0 transactions"] and stored[0].startswith("  stored    2 ")
+    assert rows(db_file, "SELECT COUNT(*) FROM transactions") == [(2,)]

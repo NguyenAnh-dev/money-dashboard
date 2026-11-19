@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Next assignment: Task 2b, CSV import preview and validation.** Step 1 (baseline investigation), Task 1a (offline test startup), and Task 2a (explicit CSV import account selection) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Next assignment: Task 2d, correct the sync failure message at the commit boundary.** Step 1 (baseline investigation), Task 1a (offline test startup), Task 2a (explicit CSV import account selection), Task 2b (CSV import preview and validation), and Task 2c (accurate CSV import counts) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -46,12 +46,14 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Parse the entire file before committing. Preview the account, date range, row count, and sample rows labeled charge or credit. Support UTF-8 with optional BOM, quoted descriptions and thousands separators, `MM/DD/YYYY` posted dates, and the headers `Date,Description,Amount`. Negative means charge and positive means credit. Bare amounts are assumed USD.
 - **Accept when** preview and cancellation leave a fresh database path absent and an existing database untouched. A malformed final row or an explicit non-USD amount identifies the row and reason and commits nothing. Confirming imports the validated data.
 - **Verify** the normal command with a quoted merchant, a BOM, a refund, a malformed last row, and an explicit `EUR` amount. Check the path on fresh runs and compare existing rows before and after rejection or cancellation. [CSV reader](../adapters/csv_source.py) · [CSV tests](../tests/test_csv_source.py)
+- **Accepted.** Commit `736ccb2` adds a preview and confirmation step that saves the same validated rows shown in the preview. Codex verified that a CSV with a BOM, quoted merchant, thousands separator, and refund previewed and stored correctly, even when the source file was deleted at the confirmation prompt. Cancellation and rejection of malformed, non-USD, oversized, and fractional-cent rows left fresh database paths absent and preserved an existing database byte for byte. The offline suite reported **652 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate and whitespace checks passed. [Implementation notes](CSV_IMPORT.md)
 
 ### 2c. Report new and previously stored transactions accurately
 
 - **Change.** Make the committed import summary distinguish new and previously stored rows for that account. Preserve the current content-based IDs and occurrence handling for identical rows.
 - **Accept when** the first sample import reports 19 new and 0 previously stored, and the repeat reports 0 new and 19 previously stored. Both identical same-day charges survive. The sample totals remain $2,573.34 in charges and $2,300.00 in credits.
 - **Verify** both CLI summaries against SQLite rows. Import an overlapping statement with one distinguishable new charge and verify only that charge is added. Document the ambiguity of identical rows across partial exports without bank transaction IDs. [Sample CSV](../fixtures/bank_export.csv) · [ID generation](../adapters/fingerprint.py)
+- **Accepted.** Codex verified against SQLite that the sample reports 19 new and 0 previously stored on first import and 0 new and 19 previously stored on repeat. Both same-day duplicates survive, and the totals remain $2,573.34 in charges and $2,300.00 in credits. The partial export reports 1 new and 18 previously stored, retains all original rows, and adds only the new charge. Importing the sample into a second account reports 19 new and 0 previously stored with distinct IDs. The final offline suite reported **656 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate and whitespace checks passed. [Implementation notes](CSV_IMPORT.md)
 
 ### 2d. Correct the sync failure message at the commit boundary
 
@@ -114,4 +116,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Task 2b awaits the owner’s assignment. Once assigned, Claude implements Task 2b only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 2d awaits the owner’s assignment. Once assigned, Claude implements Task 2d only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.

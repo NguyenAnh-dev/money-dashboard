@@ -143,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
               "already exist.", file=sys.stderr)
         return 1
     sync._report(run)
+    print(f"  new       {run.result.new} transactions")
+    print(f"  stored    {run.result.existing} transactions were already "
+          f"stored for this account")
     return 0
 
 

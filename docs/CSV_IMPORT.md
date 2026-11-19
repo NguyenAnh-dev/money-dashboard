@@ -29,3 +29,10 @@
 ## Fifth review fix
 
 - **Integer string limit.** `to_cents` used to rebuild the coefficient as a string for `int()`, which fails past Python's 4,300-digit conversion limit. It now builds a `Decimal` from the validated coefficient tuple and a non-negative exponent and calls `int()` on that, which is exact and involves no string or context arithmetic. The CSV importer still rejects such amounts at the range check, with the row number, before opening the database.
+
+## Task 2c: new and previously stored rows
+
+- **Counting.** `repository.save` asks `count_stored` how many of the incoming transaction ids already exist, before the upsert and inside the same transaction. `SaveResult.new` and `SaveResult.existing` hold the split (new = distinct ids minus existing). Both default to 0, so existing positional constructions still work. IDs and occurrence handling in `adapters/fingerprint.py` are unchanged.
+- **Output.** `import_csv.main` prints `new` and `stored` lines after the shared sync report. The existing `wrote N transactions` line still counts every row upserted. `sync.py` output is unchanged.
+- **Per account.** IDs embed the connection, which is scoped per user and account identifier, so an id match is a match for that account. The same rows imported under another account are new.
+- **Ambiguity.** Without bank transaction IDs, "previously stored" means "same date, description, amount and occurrence number". Two identical same-day charges are told apart only by their order within one file. If a later partial export contains only one of them, it matches the first stored copy and the second stays stored but unmentioned. If an export lists a same-day duplicate that an earlier export held only once, the extra copy counts as new, which may be a real second charge or an overlap artifact. Neither case can be resolved from the CSV alone.
