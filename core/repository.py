@@ -557,3 +557,74 @@ def load_transactions(
         )
         for row in rows
     ]
+
+
+TRACKED = "tracked"
+DISMISSED = "dismissed"
+
+
+class UnknownAccount(ValueError):
+    pass
+
+
+class DecisionDismissed(ValueError):
+    pass
+
+
+def owns_account(conn: sqlite3.Connection, user_id: str, account_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM accounts a JOIN connections c "
+        "ON c.provider = a.provider AND c.connection_id = a.connection_id "
+        "WHERE a.id = ? AND c.user_id = ?",
+        (account_id, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def set_decision(
+    conn: sqlite3.Connection,
+    user_id: str,
+    account_id: str,
+    merchant: str,
+    decision: str,
+    decided_at: datetime | None = None,
+) -> None:
+    if not owns_account(conn, user_id, account_id):
+        raise UnknownAccount(account_id)
+    stamp = (decided_at or datetime.now()).replace(microsecond=0).isoformat()
+    guard = " WHERE subscription_decisions.decision <> 'dismissed'"         if decision == TRACKED else ""
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO subscription_decisions "
+            "(user_id, account_id, merchant, decision, decided_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id, account_id, merchant) DO UPDATE SET "
+            "decision = excluded.decision, decided_at = excluded.decided_at"
+            + guard,
+            (user_id, account_id, merchant, decision, stamp),
+        )
+    if cursor.rowcount == 0:
+        raise DecisionDismissed(merchant)
+
+
+def clear_decision(
+    conn: sqlite3.Connection, user_id: str, account_id: str, merchant: str
+) -> bool:
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM subscription_decisions "
+            "WHERE user_id = ? AND account_id = ? AND merchant = ?",
+            (user_id, account_id, merchant),
+        )
+    return cursor.rowcount > 0
+
+
+def load_decisions(
+    conn: sqlite3.Connection, user_id: str
+) -> dict[tuple[str, str], str]:
+    rows = conn.execute(
+        "SELECT account_id, merchant, decision FROM subscription_decisions "
+        "WHERE user_id = ?",
+        (user_id,),
+    )
+    return {(row["account_id"], row["merchant"]): row["decision"] for row in rows}

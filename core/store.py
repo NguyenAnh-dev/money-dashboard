@@ -56,7 +56,7 @@ from core import migrations
 #: `upgrade` refuses to open a file it cannot walk forward rather than skipping
 #: the gap. Bumping this alone now fails loudly instead of orphaning every
 #: existing database. See docs/MIGRATIONS.md.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -262,6 +262,19 @@ CREATE TABLE IF NOT EXISTS connections (
     CHECK (access_token IS NULL OR access_token LIKE 'gAAAAA%'),
     CHECK (provider IN ('fake', 'plaid', 'csv')),
     CHECK (length(connection_id) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_decisions (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    decision        TEXT NOT NULL,
+    decided_at      TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant),
+    CHECK (decision IN ('tracked', 'dismissed')),
+    CHECK (length(merchant) > 0),
+    CHECK (length(decided_at) = 19)
 );
 
 -- Each index exists for a query we already know we make.

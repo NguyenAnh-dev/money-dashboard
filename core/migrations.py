@@ -183,6 +183,11 @@ def _id_under(provider: str, connection_id: str, provider_id: str) -> str:
     ))
 
 
+def to_v8(conn: sqlite3.Connection) -> None:
+    return None
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: to_v7,
+    7: to_v8,
 }

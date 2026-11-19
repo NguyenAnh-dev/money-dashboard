@@ -103,7 +103,8 @@ def account_labels(accounts):
     return labels
 
 
-def show_subscriptions(transactions, console, accounts=()):
+def show_subscriptions(transactions, console, accounts=(), decisions=None):
+    decisions = decisions or {}
     names = account_labels(accounts)
     table = Table(title="Recurring Charges", title_style="bold",
                   header_style="bold cyan")
@@ -115,6 +116,9 @@ def show_subscriptions(transactions, console, accounts=()):
     table.add_column("Charges", no_wrap=True)
 
     for c in find_recurring(transactions):
+        status = decisions.get((c.account_id, c.merchant))
+        if status == "dismissed":
+            continue
         # direction is None when the price has never moved.
         if c.direction == "up":
             change = f"[red]+{dollars(c.delta_cents)}[/red]"
@@ -125,7 +129,8 @@ def show_subscriptions(transactions, console, accounts=()):
 
         history = Text("\n".join(f"{d} {dollars(cents)}"
                                  for d, cents in c.evidence))
-        table.add_row(Text(c.merchant), Text(names.get(c.account_id, c.account_id)),
+        label = f"{c.merchant} (tracked)" if status == "tracked" else c.merchant
+        table.add_row(Text(label), Text(names.get(c.account_id, c.account_id)),
                       dollars(c.latest_cents), str(c.day),
                       change, history)
 
@@ -178,6 +183,7 @@ def main(console=None):
         transactions = repository.load_transactions(conn, user_id)
         synced_at = repository.last_synced_at(conn)
         providers = repository.stored_providers(conn, user_id)
+        decisions = repository.load_decisions(conn, user_id)
     finally:
         conn.close()
 
@@ -192,7 +198,7 @@ def main(console=None):
 
     show_accounts(accounts, console)
     console.print()
-    show_subscriptions(transactions, console, accounts)
+    show_subscriptions(transactions, console, accounts, decisions)
     console.print()
     show_spending(transactions, console)
     console.print()
