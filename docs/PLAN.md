@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Next assignment: Task 3, detect candidates separately for each account.** Step 1 (baseline investigation), Task 1a (offline test startup), and Tasks 2a–2d (CSV import and sync failure reporting) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Task 5b (acknowledge the specific increase) awaits assignment.** Step 1 (baseline investigation), Task 1a (offline test startup), Tasks 2a–2d (CSV import and sync failure reporting), Task 3 (per-account candidate detection), Task 4 (subscription decisions), and Task 5a (price-increase warnings) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -67,18 +67,21 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Group posted, positive model charges by owner, account, and normalized merchant. Retain the existing rule of one charge per month across at least three distinct months with 26–35 day gaps. Exclude zero amounts, credits, pending entries, and known transfers. Show account, dates, and amounts as evidence the user can review. A CSV cannot identify every transfer.
 - **Accept when** three monthly Netflix charges produce one candidate on that card. Two cards cannot pool their histories to reach three observations. The sample still yields Hulu at $19.99 with a $2.00 increase.
 - **Verify** with the existing Hulu and irregular-shopping cases, two cards with insufficient individual histories, and two cards each with sufficient history. Exercise the CLI and the existing API recurring-route tests. [Analysis](../insights.py) · [CSV cases](../tests/test_csv_source.py) · [API route](../api/routes/insights.py)
+- **Accepted.** The owner confirmed that Task 3 was already finalized. Commit `eb3a36a` implements per-account candidate detection and shows the supporting charges in the dashboard and recurring API. [Regression tests](../tests/test_recurring_accounts.py)
 
 ### 4. Persist track, dismiss, and restore decisions
 
 - **Change.** Expose those three actions on a local candidate, identified by owner, account, and merchant. Add only the persistent state needed for the decisions. Use the existing schema upgrade mechanism.
 - **Accept when** decisions survive restarting, reimporting, and a missing month. A dismissed candidate stays hidden until restored. Changing one card’s decision leaves the other card alone.
 - **Verify** each action through the CLI, close and reopen the database, and repeat the import. Test a fresh database, an upgrade from schema v7, and the supported v6 upgrade chain with synthetic data. Check transaction IDs and foreign-key integrity after migration. [Store](../core/store.py) · [Migration guidance](MIGRATIONS.md)
+- **Accepted.** Commit `9c2b95f` adds schema v8 and per-account subscription decisions. Codex independently verified that decisions survive separate CLI runs, repeat imports, and a missing month, that one card's decision leaves the other card alone, and that a dismissed candidate stays hidden until explicitly restored. Tests covered fresh databases, upgrades from v7 and v6, transaction IDs, and foreign-key integrity. The offline suite reported **690 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate and `git diff --check` passed. Codex also verified the documented PowerShell UTF-8 workflow with a synthetic statement and disposable database. [Implementation notes](SUBSCRIPTIONS.md)
 
 ### 5a. Emit one warning for each observed increase
 
 - **Change.** Use consecutive eligible posted charges on the tracked account. At initial tracking, compare the latest charge with its immediate predecessor. For later imports, identify each new increase by the subscription and the transaction that introduced the price. Display merchant, account, date, old and new amounts, and difference.
 - **Accept when** tracking the example produces one $2.00 warning. An unchanged next charge keeps that warning visible. A decrease, pending charge, repeat import, or older backfill produces no new current warning. A subsequent, distinct increase generates its own warning.
 - **Verify** with the example, a flat month, a pending charge, a decrease followed by a return to the old price, and an older overlapping import. Check event counts and posted dates as well as displayed amounts. [Existing price comparison](../insights.py)
+- **Accepted.** Schema v11 stores each observed increase for a tracked subscription, keyed by the subscription and the introducing transaction. The offline tests cover the $2.00 example, flat follow-ups, pending charges, decreases and returns to the prior price, repeat and overlapping imports, and distinct later increases. Codex independently verified that the v10 upgrade preserves an existing corrected predecessor through a posted-to-pending-to-posted transition and leaves an ordinary older backfill with the same date and amount out of the comparison. Recovery from v10 requires the stored warning to still identify its corrected predecessor. The offline suite reported **754 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate passed with byte-identical output. Staged and unstaged whitespace checks passed. [Implementation notes](PRICE_INCREASES.md) · [Regression tests](../tests/test_price_increases.py) · [Upgrade tests](../tests/test_price_order_and_moves.py)
 
 ### 5b. Acknowledge the specific increase
 
@@ -122,4 +125,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Task 3 awaits the owner’s assignment. Once assigned, Claude implements Task 3 only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 5b awaits the owner’s assignment. Once assigned, Claude implements Task 5b only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.

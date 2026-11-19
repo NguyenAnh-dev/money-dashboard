@@ -56,7 +56,7 @@ from core import migrations
 #: `upgrade` refuses to open a file it cannot walk forward rather than skipping
 #: the gap. Bumping this alone now fails loudly instead of orphaning every
 #: existing database. See docs/MIGRATIONS.md.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 11
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -275,6 +275,53 @@ CREATE TABLE IF NOT EXISTS subscription_decisions (
     CHECK (decision IN ('tracked', 'dismissed')),
     CHECK (length(merchant) > 0),
     CHECK (length(decided_at) = 19)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_observed (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    charge_id       TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(merchant) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_corrected (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    charge_id       TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(merchant) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_watch (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    scanned_through TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant),
+    CHECK (length(merchant) > 0),
+    CHECK (length(scanned_through) = 10)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_increases (
+    user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id         TEXT NOT NULL REFERENCES accounts(id),
+    merchant           TEXT NOT NULL,
+    charge_id          TEXT NOT NULL,
+    previous_charge_id TEXT NOT NULL,
+    charge_date        TEXT NOT NULL,
+    old_cents          INTEGER NOT NULL,
+    new_cents          INTEGER NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(charge_date) = 10),
+    CHECK (new_cents > old_cents)
 );
 
 -- Each index exists for a query we already know we make.

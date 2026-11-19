@@ -131,3 +131,21 @@ def find_recurring(transactions):
         ))
 
     return sorted(found, key=lambda c: (-c.latest_cents, c.merchant, c.account_id))
+
+
+@dataclass(frozen=True)
+class PriceIncrease:
+    merchant: str
+    account_id: str
+    charge_id: str
+    date: date
+    old_cents: int
+    new_cents: int
+
+    @property
+    def delta_cents(self) -> int:
+        return self.new_cents - self.old_cents
+
+    @property
+    def key(self) -> tuple:
+        return (self.account_id, self.merchant, self.charge_id)

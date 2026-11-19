@@ -8,6 +8,7 @@ from rich.text import Text
 
 from core import repository, store, users
 from core.money import format_money as dollars
+from import_csv import safe
 from insights import total_balance, spending_by_category, find_recurring
 
 # NOTE: there is deliberately no module-level `console`. The rendering target is
@@ -137,6 +138,25 @@ def show_subscriptions(transactions, console, accounts=(), decisions=None):
     console.print(table)
 
 
+def show_price_increases(warnings, console, accounts=()):
+    if not warnings:
+        return
+    names = account_labels(accounts)
+    console.print()
+    table = Table(title="Price Increases", title_style="bold",
+                  header_style="bold cyan")
+    for col in ("Merchant", "Account", "Date"):
+        table.add_column(col)
+    for col in ("Old", "New", "Increase"):
+        table.add_column(col, justify="right")
+    for w in warnings:
+        table.add_row(Text(safe(w.merchant)),
+                      Text(safe(names.get(w.account_id, w.account_id))),
+                      str(w.date), dollars(w.old_cents), dollars(w.new_cents),
+                      f"[red]+{dollars(w.delta_cents)}[/red]")
+    console.print(table)
+
+
 def show_no_data(console, path):
     console.print()
     console.print("[bold]  MONEY DASHBOARD[/bold]  [dim]v0.1[/dim]")
@@ -184,6 +204,7 @@ def main(console=None):
         synced_at = repository.last_synced_at(conn)
         providers = repository.stored_providers(conn, user_id)
         decisions = repository.load_decisions(conn, user_id)
+        increases = repository.load_price_increases(conn, user_id)
     finally:
         conn.close()
 
@@ -199,6 +220,7 @@ def main(console=None):
     show_accounts(accounts, console)
     console.print()
     show_subscriptions(transactions, console, accounts, decisions)
+    show_price_increases(increases, console, accounts)
     console.print()
     show_spending(transactions, console)
     console.print()

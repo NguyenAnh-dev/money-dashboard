@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Any, NamedTuple, Sequence
 
 from core import crypto
+from insights import PriceIncrease
 from core.models import (
     Account,
     AccountType,
@@ -252,6 +253,24 @@ def superseded_ids(transactions: Sequence[Transaction]) -> list[str]:
     return [i for i in found if i is not None]
 
 
+def redated_ids(
+    conn: sqlite3.Connection, transactions: Sequence[Transaction]
+) -> frozenset:
+    wanted = {t.id: t.date.isoformat() for t in transactions}
+    ids = sorted(wanted)
+    moved = set()
+    for start in range(0, len(ids), DELETE_CHUNK):
+        chunk = ids[start:start + DELETE_CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        for row in conn.execute(
+            f"SELECT id, date FROM transactions WHERE id IN ({placeholders})",
+            chunk,
+        ):
+            if row["date"] != wanted[row["id"]]:
+                moved.add(row["id"])
+    return frozenset(moved)
+
+
 def save(
     conn: sqlite3.Connection,
     user_id: str,
@@ -273,11 +292,13 @@ def save(
                             fetched_at=when)
         save_accounts(conn, user_id, accounts)
         existing = count_stored(conn, transactions)
+        moved = redated_ids(conn, transactions)
         save_transactions(conn, user_id, transactions)
         deletion = delete_transactions(conn, user_id, removed)
         settled = delete_transactions(
             conn, user_id, superseded_ids(transactions)
         )
+        scan_price_increases(conn, user_id, moved)
         conn.execute(
             "UPDATE meta SET last_synced_at = ? WHERE id = 1", (stamp,)
         )
@@ -603,19 +624,26 @@ def set_decision(
             + guard,
             (user_id, account_id, merchant, decision, stamp),
         )
-    if cursor.rowcount == 0:
-        raise DecisionDismissed(merchant)
+        if cursor.rowcount == 0:
+            raise DecisionDismissed(merchant)
+        if decision == TRACKED:
+            scan_watch(conn, user_id, account_id, merchant)
 
 
 def clear_decision(
     conn: sqlite3.Connection, user_id: str, account_id: str, merchant: str
 ) -> bool:
+    key = (user_id, account_id, merchant)
     with conn:
         cursor = conn.execute(
             "DELETE FROM subscription_decisions "
-            "WHERE user_id = ? AND account_id = ? AND merchant = ?",
-            (user_id, account_id, merchant),
+            "WHERE user_id = ? AND account_id = ? AND merchant = ?", key,
         )
+        for table in PRICE_TABLES:
+            conn.execute(
+                f"DELETE FROM {table} "
+                "WHERE user_id = ? AND account_id = ? AND merchant = ?", key,
+            )
     return cursor.rowcount > 0
 
 
@@ -628,3 +656,217 @@ def load_decisions(
         (user_id,),
     )
     return {(row["account_id"], row["merchant"]): row["decision"] for row in rows}
+
+
+ELIGIBLE_SQL = (
+    "SELECT id, date, amount_cents, rowid AS row_order FROM transactions "
+    "WHERE account_id = ? AND merchant = ? AND pending = 0 "
+    "AND amount_cents > 0 AND kind <> 'transfer'"
+)
+
+PRICE_TABLES = (
+    "subscription_price_observed",
+    "subscription_price_watch",
+    "subscription_price_increases",
+    "subscription_price_corrected",
+)
+
+
+def _eligible_charges(
+    conn: sqlite3.Connection, account_id: str, merchant: str
+) -> list[sqlite3.Row]:
+    return conn.execute(ELIGIBLE_SQL, (account_id, merchant)).fetchall()
+
+
+def _record_increase(
+    conn: sqlite3.Connection, user_id: str, account_id: str, merchant: str,
+    charge: sqlite3.Row, previous: sqlite3.Row,
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO subscription_price_increases "
+        "(user_id, account_id, merchant, charge_id, previous_charge_id, "
+        "charge_date, old_cents, new_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, account_id, merchant, charge["id"], previous["id"],
+         charge["date"], previous["amount_cents"], charge["amount_cents"]),
+    )
+
+
+def scan_watch(
+    conn: sqlite3.Connection, user_id: str, account_id: str, merchant: str
+) -> None:
+    charges = _eligible_charges(conn, account_id, merchant)
+    key = (user_id, account_id, merchant)
+    ledger = {
+        row["charge_id"]: row["seq"] for row in conn.execute(
+            "SELECT charge_id, seq FROM subscription_price_observed "
+            "WHERE user_id = ? AND account_id = ? AND merchant = ?", key)
+    }
+    existing = {
+        row["id"] for row in conn.execute(
+            "SELECT id FROM transactions WHERE account_id = ? AND merchant = ?",
+            (account_id, merchant))
+    }
+    for gone in [i for i in ledger if i not in existing]:
+        conn.execute(
+            "DELETE FROM subscription_price_observed WHERE user_id = ? "
+            "AND account_id = ? AND merchant = ? AND charge_id = ?",
+            (*key, gone))
+        conn.execute(
+            "DELETE FROM subscription_price_corrected WHERE user_id = ? "
+            "AND account_id = ? AND merchant = ? AND charge_id = ?",
+            (*key, gone))
+        del ledger[gone]
+
+    row = conn.execute(
+        "SELECT scanned_through FROM subscription_price_watch "
+        "WHERE user_id = ? AND account_id = ? AND merchant = ?", key
+    ).fetchone()
+    cutoff = row["scanned_through"] if row else None
+    if cutoff is None and ledger:
+        cutoff = max(c["date"] for c in charges if c["id"] in ledger)
+
+    new = [c for c in charges if c["id"] not in ledger]
+    if not new:
+        return
+
+    def order(c):
+        if c["id"] in ledger:
+            return (c["date"], 0, ledger[c["id"]])
+        return (c["date"], 1, c["row_order"])
+
+    ordered = sorted(charges, key=order)
+    new_ids = {c["id"] for c in new}
+    if cutoff is None:
+        if len(ordered) >= 2 and ordered[-1]["amount_cents"] > ordered[-2]["amount_cents"]:
+            _record_increase(conn, user_id, account_id, merchant,
+                             ordered[-1], ordered[-2])
+    else:
+        for index, charge in enumerate(ordered):
+            if charge["id"] not in new_ids or index == 0:
+                continue
+            if (charge["date"] >= cutoff
+                    and charge["amount_cents"] > ordered[index - 1]["amount_cents"]):
+                _record_increase(conn, user_id, account_id, merchant,
+                                 charge, ordered[index - 1])
+
+    seq = max(ledger.values(), default=0)
+    for charge in ordered:
+        if charge["id"] in new_ids:
+            seq += 1
+            conn.execute(
+                "INSERT INTO subscription_price_observed "
+                "(user_id, account_id, merchant, charge_id, seq) "
+                "VALUES (?, ?, ?, ?, ?)", (*key, charge["id"], seq))
+    conn.execute(
+        "INSERT INTO subscription_price_watch "
+        "(user_id, account_id, merchant, scanned_through) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id, account_id, merchant) DO UPDATE SET "
+        "scanned_through = max(scanned_through, excluded.scanned_through)",
+        (*key, max(c["date"] for c in new)),
+    )
+
+
+def reconcile_price_events(
+    conn: sqlite3.Connection, user_id: str, moved: frozenset = frozenset()
+) -> None:
+    events = conn.execute(
+        "SELECT account_id, merchant, charge_id, previous_charge_id, "
+        "charge_date, old_cents, new_cents FROM subscription_price_increases "
+        "WHERE user_id = ?", (user_id,),
+    ).fetchall()
+    where = ("WHERE user_id = ? AND account_id = ? AND merchant = ? "
+             "AND charge_id = ?")
+    for e in events:
+        by_id = {c["id"]: c for c in _eligible_charges(
+            conn, e["account_id"], e["merchant"])}
+        ledger = {
+            row["charge_id"]: row["seq"] for row in conn.execute(
+                "SELECT charge_id, seq FROM subscription_price_observed "
+                "WHERE user_id = ? AND account_id = ? AND merchant = ?",
+                (user_id, e["account_id"], e["merchant"]))
+        }
+        corrected = {
+            row["charge_id"] for row in conn.execute(
+                "SELECT charge_id FROM subscription_price_corrected "
+                "WHERE user_id = ? AND account_id = ? AND merchant = ?",
+                (user_id, e["account_id"], e["merchant"]))
+        }
+        now = by_id.get(e["charge_id"])
+        before = None
+        if now is not None and e["charge_id"] in ledger:
+            limit = ledger[e["charge_id"]]
+            history = sorted(
+                (c for c in by_id.values()
+                 if ledger.get(c["id"], limit + 1) <= limit
+                 or c["id"] == e["previous_charge_id"] or c["id"] in moved
+                 or c["id"] in corrected),
+                key=lambda c: (c["date"], ledger.get(c["id"], float("inf"))),
+            )
+            at = [c["id"] for c in history].index(e["charge_id"])
+            before = history[at - 1] if at > 0 else None
+        elif now is not None:
+            before = by_id.get(e["previous_charge_id"])
+        key = (user_id, e["account_id"], e["merchant"], e["charge_id"])
+        if (now is None or before is None
+                or now["amount_cents"] <= before["amount_cents"]):
+            conn.execute(f"DELETE FROM subscription_price_increases {where}", key)
+        elif (now["date"], before["id"], before["amount_cents"],
+              now["amount_cents"]) != (
+                e["charge_date"], e["previous_charge_id"], e["old_cents"],
+                e["new_cents"]):
+            conn.execute(
+                "UPDATE subscription_price_increases SET charge_date = ?, "
+                f"previous_charge_id = ?, old_cents = ?, new_cents = ? {where}",
+                (now["date"], before["id"], before["amount_cents"],
+                 now["amount_cents"], *key))
+
+
+def record_corrections(
+    conn: sqlite3.Connection, user_id: str, moved: frozenset
+) -> None:
+    for charge_id in sorted(moved):
+        conn.execute(
+            "INSERT OR IGNORE INTO subscription_price_corrected "
+            "(user_id, account_id, merchant, charge_id) "
+            "SELECT o.user_id, o.account_id, o.merchant, o.charge_id "
+            "FROM subscription_price_observed o "
+            "JOIN transactions t ON t.id = o.charge_id "
+            " AND t.account_id = o.account_id AND t.merchant = o.merchant "
+            "WHERE o.user_id = ? AND o.charge_id = ?",
+            (user_id, charge_id),
+        )
+
+
+def scan_price_increases(
+    conn: sqlite3.Connection, user_id: str, moved: frozenset = frozenset()
+) -> None:
+    record_corrections(conn, user_id, moved)
+    reconcile_price_events(conn, user_id, moved)
+    tracked = conn.execute(
+        "SELECT account_id, merchant FROM subscription_decisions "
+        "WHERE user_id = ? AND decision = 'tracked'", (user_id,),
+    ).fetchall()
+    for row in tracked:
+        scan_watch(conn, user_id, row["account_id"], row["merchant"])
+
+
+def load_price_increases(
+    conn: sqlite3.Connection, user_id: str
+) -> list[PriceIncrease]:
+    rows = conn.execute(
+        "SELECT e.account_id, e.merchant, e.charge_id, e.charge_date, "
+        "e.old_cents, e.new_cents FROM subscription_price_increases e "
+        "JOIN subscription_decisions d ON d.user_id = e.user_id "
+        " AND d.account_id = e.account_id AND d.merchant = e.merchant "
+        "WHERE e.user_id = ? AND d.decision = 'tracked' "
+        "ORDER BY e.charge_date DESC, e.merchant, e.account_id, e.charge_id",
+        (user_id,),
+    )
+    return [
+        PriceIncrease(
+            merchant=r["merchant"], account_id=r["account_id"],
+            charge_id=r["charge_id"], date=_to_date(r["charge_date"]),
+            old_cents=r["old_cents"], new_cents=r["new_cents"],
+        )
+        for r in rows
+    ]

@@ -187,7 +187,130 @@ def to_v8(conn: sqlite3.Connection) -> None:
     return None
 
 
+def to_v9(conn: sqlite3.Connection) -> None:
+    tracked = conn.execute(
+        "SELECT user_id, account_id, merchant FROM subscription_decisions "
+        "WHERE decision = 'tracked'"
+    ).fetchall()
+    for user_id, account_id, merchant in tracked:
+        charges = conn.execute(
+            "SELECT id FROM transactions WHERE account_id = ? AND merchant = ? "
+            "AND pending = 0 AND amount_cents > 0 AND kind <> 'transfer' "
+            "ORDER BY date, rowid",
+            (account_id, merchant),
+        ).fetchall()
+        conn.executemany(
+            "INSERT OR IGNORE INTO subscription_price_observed "
+            "(user_id, account_id, merchant, charge_id, seq) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(user_id, account_id, merchant, row[0], seq)
+             for seq, row in enumerate(charges, start=1)],
+        )
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def to_v10(conn: sqlite3.Connection) -> None:
+    eligible = (
+        "SELECT id, date, amount_cents FROM transactions WHERE account_id = ? "
+        "AND merchant = ? AND pending = 0 AND amount_cents > 0 "
+        "AND kind <> 'transfer' ORDER BY date, rowid"
+    )
+    tracked = conn.execute(
+        "SELECT user_id, account_id, merchant FROM subscription_decisions "
+        "WHERE decision = 'tracked'"
+    ).fetchall()
+    for user_id, account_id, merchant in tracked:
+        key = (user_id, account_id, merchant)
+        watch = conn.execute(
+            "SELECT scanned_through FROM subscription_price_watch "
+            "WHERE user_id = ? AND account_id = ? AND merchant = ?", key
+        ).fetchone()
+        seen = conn.execute(
+            "SELECT count(*) FROM subscription_price_observed "
+            "WHERE user_id = ? AND account_id = ? AND merchant = ?", key
+        ).fetchone()[0]
+        if watch is not None and seen == 0:
+            charges = [
+                row for row in conn.execute(eligible, (account_id, merchant))
+                if row[1] <= watch[0]
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO subscription_price_observed "
+                "(user_id, account_id, merchant, charge_id, seq) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(*key, row[0], seq) for seq, row in enumerate(charges, start=1)],
+            )
+        elif watch is None and seen:
+            newest = conn.execute(
+                "SELECT max(t.date) FROM subscription_price_observed o "
+                "JOIN transactions t ON t.id = o.charge_id "
+                "WHERE o.user_id = ? AND o.account_id = ? AND o.merchant = ?", key
+            ).fetchone()[0]
+            if newest is not None:
+                conn.execute(
+                    "INSERT INTO subscription_price_watch "
+                    "(user_id, account_id, merchant, scanned_through) "
+                    "VALUES (?, ?, ?, ?)", (*key, newest),
+                )
+
+    has_old = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'subscription_price_events'"
+    ).fetchone()
+    if not has_old:
+        return
+    with_previous = "previous_charge_id" in _table_columns(
+        conn, "subscription_price_events")
+    for row in conn.execute(
+        "SELECT * FROM subscription_price_events"
+    ).fetchall():
+        user_id, account_id, merchant = row["user_id"], row["account_id"], row["merchant"]
+        previous_id = None
+        if with_previous:
+            previous_id = row["previous_charge_id"]
+        else:
+            charges = conn.execute(eligible, (account_id, merchant)).fetchall()
+            ids = [c[0] for c in charges]
+            if row["charge_id"] in ids and ids.index(row["charge_id"]) > 0:
+                at = ids.index(row["charge_id"])
+                before, now = charges[at - 1], charges[at]
+                if (before[2] == row["old_cents"] and now[2] == row["new_cents"]
+                        and now[1] == row["charge_date"]):
+                    previous_id = before[0]
+        if previous_id is None:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO subscription_price_increases "
+            "(user_id, account_id, merchant, charge_id, previous_charge_id, "
+            "charge_date, old_cents, new_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, account_id, merchant, row["charge_id"], previous_id,
+             row["charge_date"], row["old_cents"], row["new_cents"]),
+        )
+
+
+def to_v11(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO subscription_price_corrected "
+        "(user_id, account_id, merchant, charge_id) "
+        "SELECT e.user_id, e.account_id, e.merchant, e.previous_charge_id "
+        "FROM subscription_price_increases e "
+        "JOIN subscription_price_observed oi "
+        "  ON oi.user_id = e.user_id AND oi.account_id = e.account_id "
+        " AND oi.merchant = e.merchant AND oi.charge_id = e.charge_id "
+        "JOIN subscription_price_observed op "
+        "  ON op.user_id = e.user_id AND op.account_id = e.account_id "
+        " AND op.merchant = e.merchant AND op.charge_id = e.previous_charge_id "
+        "WHERE op.seq > oi.seq"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: to_v7,
     7: to_v8,
+    8: to_v9,
+    9: to_v10,
+    10: to_v11,
 }

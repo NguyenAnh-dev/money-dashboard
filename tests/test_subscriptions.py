@@ -195,7 +195,7 @@ def test_a_v7_database_upgrades_keeps_ids_and_accepts_decisions(tmp_path):
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [8]
+        assert store.init_schema(conn) == [8, 9, 10, 11]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         account = conn.execute("SELECT id FROM accounts LIMIT 1").fetchone()[0]
         repository.set_decision(conn, users.LOCAL_USER_ID, account, "Hulu",
@@ -208,7 +208,7 @@ def test_a_v7_database_upgrades_keeps_ids_and_accepts_decisions(tmp_path):
     assert sql(path, "SELECT schema_version FROM meta")[0][0] == store.SCHEMA_VERSION
 
 
-def test_the_supported_v6_chain_reaches_v8_with_ids_intact(tmp_path):
+def test_the_supported_v6_chain_reaches_v9_with_ids_intact(tmp_path):
     path = _seeded(tmp_path / "v6.db")
     _downgrade(path, 6)
     count = sql(path, "SELECT count(*) FROM transactions")[0][0]
@@ -216,7 +216,7 @@ def test_the_supported_v6_chain_reaches_v8_with_ids_intact(tmp_path):
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [7, 8]
+        assert store.init_schema(conn) == [7, 8, 9, 10, 11]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
@@ -226,11 +226,12 @@ def test_the_supported_v6_chain_reaches_v8_with_ids_intact(tmp_path):
     joined = sql(path, "SELECT count(*) FROM transactions t JOIN accounts a "
                        "ON a.id = t.account_id")[0][0]
     assert joined == count
-    assert sql(path, "SELECT schema_version FROM meta")[0][0] == 8
+    assert sql(path, "SELECT schema_version FROM meta")[0][0] == 11
 
 
 def test_the_registry_has_a_step_for_v8():
     assert 7 in migrations.MIGRATIONS
+    assert 8 in migrations.MIGRATIONS
 
 
 def test_track_is_refused_while_dismissed_and_allowed_after_restore(env, capsys):

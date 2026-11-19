@@ -181,10 +181,10 @@ def test_the_schema_refuses_a_plaintext_token(db, ada):
         )
 
 
-def test_schema_version_is_eight(db):
-    assert store.SCHEMA_VERSION == 8
+def test_schema_version_is_eleven(db):
+    assert store.SCHEMA_VERSION == 11
     row = db.execute("SELECT schema_version FROM meta WHERE id = 1").fetchone()
-    assert row["schema_version"] == 8
+    assert row["schema_version"] == 11
 
 
 # ---------------------------------------------------------------------------
