@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Next assignment: Task 2d, correct the sync failure message at the commit boundary.** Step 1 (baseline investigation), Task 1a (offline test startup), Task 2a (explicit CSV import account selection), Task 2b (CSV import preview and validation), and Task 2c (accurate CSV import counts) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Next assignment: Task 3, detect candidates separately for each account.** Step 1 (baseline investigation), Task 1a (offline test startup), and Tasks 2a–2d (CSV import and sync failure reporting) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -60,6 +60,7 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Make CLI failure reporting describe the scope of rollback accurately. Preserve per-connection commits.
 - **Accept when** a failure on a later connection tells the user earlier connections may already have been saved. A failed connection’s rows and cursor remain consistent.
 - **Verify** with two synthetic sources: let the first save, then force a failure during the second save. Inspect the CLI error, first connection’s persisted rows and cursor, and second connection’s prior state. [Sync error handler](../sync.py) · [Repository save](../core/repository.py)
+- **Accepted.** Codex independently verified the working-tree changes. The CLI reports earlier completed saves and describes connection sync data even when database setup has already written. The regression test seeds both connections, fails after the second connection writes inside its transaction, and reopens the database to verify that the first connection’s updates persisted and the second kept its prior rows and cursor. The offline suite reported **661 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate and whitespace checks passed. [Regression tests](../tests/test_sync_failure.py) · [Sync documentation](SYNC.md)
 
 ### 3. Detect candidates separately for each account
 
@@ -114,6 +115,11 @@ Date,Description,Amount
 10/12/2026,NETFLIX.COM,-17.99
 ```
 
+## Follow-up risks from task 2d
+
+- **Connection lookup during error handling.** The sync loop calls `source.connection()` again when a source fails. The built-in CLI sources resolve their identifiers before the loop. If a future source can fail during identifier lookup inside the loop, the second lookup could obscure the original failure and omit earlier completed saves. Revisit this if source resolution becomes fallible or moves inside the loop. [Sync loop](../sync.py#L73) · [Source selection](../sync.py#L33)
+- **Exception details in shared logs.** The CLI prints exception text and preserves the traceback. Before routing that output to a shared log or hosted service, check which details upstream provider errors can carry and which should be redacted. The offline checks used synthetic sources and did not exercise live Plaid failures. [CLI error handlers](../sync.py#L117)
+
 ## Next handoff
 
-Task 2d awaits the owner’s assignment. Once assigned, Claude implements Task 2d only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 3 awaits the owner’s assignment. Once assigned, Claude implements Task 3 only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.

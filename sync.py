@@ -13,6 +13,14 @@ class ConnectionSync(NamedTuple):
     result: repository.SaveResult
 
 
+class SyncFailed(Exception):
+    def __init__(self, failed: ConnectionRef, saved: list[ConnectionSync],
+                 cause: Exception):
+        self.failed = failed
+        self.saved = saved
+        super().__init__(f"{type(cause).__name__}: {cause}")
+
+
 def linked_sources(conn, user_id: str) -> list:
     from adapters.plaid_source import PlaidSource
 
@@ -69,10 +77,13 @@ def sync(user_id: str | None = None,
         if user_id is None:
             user_id = users.ensure_local_user(conn)
 
-        return [
-            sync_source(conn, user_id, source)
-            for source in sources_for(conn, user_id, include_configured)
-        ]
+        saved: list[ConnectionSync] = []
+        for source in sources_for(conn, user_id, include_configured):
+            try:
+                saved.append(sync_source(conn, user_id, source))
+            except Exception as exc:
+                raise SyncFailed(source.connection(), saved, exc) from exc
+        return saved
     finally:
         conn.close()
 
@@ -109,9 +120,31 @@ def main() -> int:
 
     try:
         runs = sync()
+    except SyncFailed as exc:
+        failed = f"{exc.failed.provider.value}:{exc.failed.connection_id}"
+        print(f"\nsync FAILED on {failed}: {exc}", file=sys.stderr)
+        print(f"{failed} did not finish saving, so this run changed none of "
+              f"its stored accounts, transactions or cursor.", file=sys.stderr)
+        if exc.saved:
+            done = ", ".join(
+                f"{r.connection.provider.value}:{r.connection.connection_id}"
+                for r in exc.saved
+            )
+            print(f"each connection commits separately, so these earlier "
+                  f"connections were already saved and stay saved: {done}",
+                  file=sys.stderr)
+        else:
+            print("no connection save had completed before this failure, so "
+                  "this run stored no connection sync data. The database "
+                  "file, schema and local user may already exist.",
+                  file=sys.stderr)
+        raise
     except Exception as exc:
         print(f"\nsync FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
-        print("nothing was written -- the database is unchanged.", file=sys.stderr)
+        print("this failure happened before any connection save completed, "
+              "so this run stored no connection sync data. The database "
+              "file, schema and local user may already exist.",
+              file=sys.stderr)
         raise
 
     for run in runs:

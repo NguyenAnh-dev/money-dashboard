@@ -124,19 +124,43 @@ outputs can be compared.
 
 ```python
     try:
-        result = sync()
+        runs = sync()
+    except SyncFailed as exc:
+        ...  # names the failed connection, then the connections already saved
+        raise
     except Exception as exc:
-        print(f"\nsync FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
-        print("nothing was written -- the database is unchanged.", file=sys.stderr)
+        ...  # failed before any connection was saved
         raise
 ```
 
-**The second line is the message that matters**, and it is a claim this project
-can actually make: `repository.save` wraps everything in one transaction, so a
-failure anywhere — a bad row, a foreign key violation, a dropped connection —
-rolls back both tables *and* the sync timestamp. Without that guarantee the
-honest message would be "the database may be partially updated", which leaves a
-person with no idea whether to re-run.
+**The rollback guarantee is per connection, not per run.** `repository.save`
+wraps one connection's accounts, transactions, cursor and timestamp in a single
+transaction, so a failure inside it leaves that connection's stored data as it
+was. But `sync()` calls `save` once per connection, so connection A has already
+committed when connection B fails. The old message, "nothing was written -- the
+database is unchanged", was false in that case. It was also overstated when
+nothing had been saved: opening the database can create or migrate the schema,
+and `ensure_local_user` can commit a row, both before the first connection runs.
+
+**`SyncFailed` carries what the handler needs**: the failing `ConnectionRef`,
+the `ConnectionSync` results whose saves completed, and the original exception
+(chained with `from`, so the traceback still shows the real cause). The messages
+are worded in terms of connection sync data, not "the database":
+
+- The failed connection "did not finish saving, so this run changed none of its
+  stored accounts, transactions or cursor". It does not say "rolled back",
+  because a fetch failure happens before any save transaction starts.
+- If earlier saves completed, they are listed as already saved and staying
+  saved.
+- If none completed, the message says so and adds that the database file,
+  schema and local user may already exist.
+- A failure outside the per-connection loop (building sources) takes the plain
+  `Exception` branch with the same "before any connection save completed"
+  wording.
+
+Per-connection commits are kept on purpose: one broken bank login should not
+discard another's good sync, and a re-run resumes from each connection's own
+stored cursor.
 
 **`raise` at the end, not `return 1`.** The traceback is the diagnostic, and this
 project prefers loud failures. The two printed lines add context *ahead of* the
