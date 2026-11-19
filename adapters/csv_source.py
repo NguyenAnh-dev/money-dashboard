@@ -34,10 +34,12 @@ against a real statement instead of inferring it from a `-` buried in a loop.
 
 from __future__ import annotations
 
-import csv
 import os
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from typing import NamedTuple
 
 from adapters.fingerprint import ContentIdMinter
 from adapters.merchant import MERCHANT_PREFIXES, normalize_merchant  # noqa: F401
@@ -134,12 +136,6 @@ UNCATEGORIZED = "Uncategorized"
 #: does), or in a user-facing override once there is a database to store one.
 KIND = TransactionKind.PURCHASE
 
-#: Key csv.DictReader parks surplus fields under. It defaults to None, which is
-#: a value you cannot distinguish from "this key was absent" -- see
-#: `_require_no_extra_fields` for the 1000x error this exists to catch.
-_EXTRA = "__extra__"
-
-
 # ---------------------------------------------------------------------------
 # Step 3: the amount cleaner
 #
@@ -153,6 +149,15 @@ _EXTRA = "__extra__"
 #: core.money.to_cents deliberately rejects all of it, so that one CSV dialect's
 #: conventions never leak into every future adapter.
 _STRIP_CHARS = str.maketrans("", "", "$, \t ")
+
+
+_CURRENCY_MARKER = re.compile(r"[A-Za-z]{3}|[€£¥₹]")
+_AMOUNT_SYNTAX = re.compile(
+    r"(?P<u1>(?i:usd)\s*)?(?P<d1>\$\s*)?(?P<sign>[+-]\s*)?"
+    r"(?P<u2>(?i:usd)\s*)?(?P<d2>\$\s*)?"
+    r"(?P<num>\d{1,3}(?:[, \xa0]\d{3})+|\d+)(?P<frac>\.\d+)?"
+    r"(?P<u3>\s*(?i:usd))?"
+)
 
 
 def clean_amount(text: str) -> int:
@@ -180,19 +185,39 @@ def clean_amount(text: str) -> int:
     raise here and be added as an explicit branch, not be absorbed by a
     permissive strip.
     """
-    stripped = text.translate(_STRIP_CHARS)
+    if text is None:
+        raise ValueError(f"missing {COLUMNS['amount']!r} value")
+    trimmed = text.strip()
+    foreign = _CURRENCY_MARKER.search(trimmed)
+    if foreign and foreign.group().upper() != CURRENCY:
+        if _AMOUNT_SYNTAX.fullmatch(_CURRENCY_MARKER.sub("", trimmed).strip()):
+            raise ValueError(
+                f"unsupported currency {foreign.group()!r} in amount "
+                f"{text!r}; only USD is supported"
+            )
+    match = _AMOUNT_SYNTAX.fullmatch(trimmed)
+    if match is None or sum(
+        1 for g in ("u1", "u2", "u3") if match.group(g)
+    ) > 1 or (match.group("d1") and match.group("d2")):
+        raise ValueError(
+            f"cannot parse amount {text!r} from the {COLUMNS['amount']!r} "
+            f"column: malformed amount syntax"
+        )
+    number = (match.group("sign") or "").strip() + match.group("num").translate(
+        _STRIP_CHARS) + (match.group("frac") or "")
     try:
-        cents = to_cents(stripped, CURRENCY)
+        cents = to_cents(number, CURRENCY)
     except (ValueError, TypeError) as exc:
-        # Re-raise with the ORIGINAL cell in the message. By this point the
-        # value has been mangled by the strip, and "malformed amount '(10.99)'"
-        # tells you which row to look at in a way "'(10.99)'" after stripping
-        # would not.
         raise ValueError(
             f"cannot parse amount {text!r} from the {COLUMNS['amount']!r} "
             f"column: {exc}"
         ) from None
-    return SIGN * cents
+    signed = SIGN * cents
+    if not _SQLITE_MIN <= signed <= _SQLITE_MAX:
+        raise ValueError(
+            f"amount {text!r} is outside the supported range for stored cents"
+        )
+    return signed
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +310,9 @@ class CsvSource:
     """
 
     def __init__(self, path: str | None = None, account: CsvAccount = DEFAULT_ACCOUNT,
-                 connection_id: str = CONNECTION_ID) -> None:
+                 connection_id: str = CONNECTION_ID,
+                 rows: Sequence[ParsedRow] | None = None) -> None:
+        self._rows = rows
         self.path = path or os.getenv("CSV_PATH", DEFAULT_PATH)
         self.account = account
         self.connection_id = connection_id
@@ -313,91 +340,193 @@ class CsvSource:
         return ConnectionRef(provider=PROVIDER, connection_id=self.connection_id)
 
     def fetch_transactions(self, cursor: str | None = None) -> SyncResult:
-        """Parse every row of the export into a Transaction.
-
-        One minter per fetch (see adapters/fingerprint.ContentIdMinter): its
-        duplicate counter must start clean on every call, or ids would depend
-        on how many times the adapter had been called in this process.
-        """
         minter = ContentIdMinter("txn")
         account_id = _ns(self.account.provider_id, self.connection_id)
+        rows = self._rows if self._rows is not None else read_rows(self.path)
 
-        transactions: list[Transaction] = []
-        # newline="" is required by the csv module, not optional style: without
-        # it, a quoted field containing a newline is split into two rows on
-        # Windows. Encoding is pinned to utf-8-sig because bank exports very
-        # often carry a BOM, and without `-sig` the first header becomes
-        # "﻿Date" and every COLUMNS lookup raises KeyError on row one.
-        with open(self.path, newline="", encoding="utf-8-sig") as fh:
-            reader = csv.DictReader(fh, restkey=_EXTRA)
-            _require_columns(reader.fieldnames, self.path)
-
-            for line_no, row in enumerate(reader, start=2):  # 1 is the header
-                try:
-                    _require_no_extra_fields(row)
-                    txn = self._build(row, minter, account_id)
-                except (ValueError, KeyError, TypeError) as exc:
-                    # Name the file and line. A statement is hundreds of rows,
-                    # and "malformed amount" with no location is a search.
-                    raise ValueError(
-                        f"{self.path} line {line_no}: {exc}"
-                    ) from None
-                transactions.append(txn)
-
-        # Statements arrive in date order and callers expect that, but the sort
-        # is PRESENTATION only -- every id above was minted from content, so
-        # reordering this list changes none of them.
+        transactions = [self._build(row, minter, account_id) for row in rows]
         transactions.sort(key=lambda t: t.date)
         return SyncResult(added=transactions)
 
-    def _build(self, row: dict, minter: ContentIdMinter, account_id: str) -> Transaction:
-        raw_date = row[COLUMNS["date"]]
-        description = row[COLUMNS["description"]]
-        raw_amount = row[COLUMNS["amount"]]
-
-        # .strip() on the date because a trailing space is a strptime error
-        # with a famously unhelpful message.
-        when = datetime.strptime(raw_date.strip(), DATE_FORMAT).date()
-        amount_cents = clean_amount(raw_amount)
-
-        # What goes into the hash: the date, the RAW descriptor, the amount in
-        # our units, and the account. Not the normalized merchant -- that is
-        # our derived value, and improving MERCHANT_PREFIXES tomorrow must not
-        # rekey every row minted today. Not the raw amount STRING either: the
-        # cents are the fact, so a re-export that writes "17.99" instead of
-        # "$17.99" still matches the row already stored.
+    def _build(self, row: ParsedRow, minter: ContentIdMinter,
+               account_id: str) -> Transaction:
         provider_id = minter.mint(
-            when.isoformat(), description, amount_cents, self.account.provider_id
+            row.date.isoformat(), row.description, row.amount_cents,
+            self.account.provider_id,
         )
 
         return Transaction(
             id=_ns(provider_id, self.connection_id),
             source=_ref(provider_id, self.connection_id),
             account_id=account_id,
-            date=when,
-            name=description,
-            merchant=_normalize_merchant(description),
-            amount_cents=amount_cents,
+            date=row.date,
+            name=row.description,
+            merchant=_normalize_merchant(row.description),
+            amount_cents=row.amount_cents,
             category=UNCATEGORIZED,
             currency=CURRENCY,
-            # A CSV export is settled history. Pending charges are, by
-            # definition, not on the statement you downloaded.
             pending=False,
-            # Set explicitly even though it equals the model's default. The
-            # default exists so an adapter that cannot classify does not break;
-            # writing it here says this adapter CONSIDERED the question and
-            # cannot answer it, which is a different statement. See KIND.
             kind=KIND,
         )
 
 
-def _require_columns(fieldnames: list[str] | None, path: str) -> None:
-    """Fail on the header, not on row 400.
+class ParsedRow(NamedTuple):
+    date: date
+    description: str
+    amount_cents: int
 
-    csv.DictReader returns None for a missing column rather than raising, so a
-    renamed header would otherwise surface as a TypeError deep inside strptime
-    with no hint that the header is what changed.
-    """
+
+_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
+CURRENCY_COLUMN = "Currency"
+_SQLITE_MIN = -(2 ** 63)
+_SQLITE_MAX = 2 ** 63 - 1
+
+
+def _decode(path: str) -> str:
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        line = len(_LINE_BREAK.findall(data[:exc.start])) + 1
+        raise ValueError(
+            f"{path} line {line}: invalid UTF-8 ({exc.reason} at byte "
+            f"{exc.start})"
+        ) from None
+
+
+def _records(text: str, path: str):
+    i = 0
+    n = len(text)
+    line = 1
+
+    def bad(where: str, reason: str) -> ValueError:
+        return ValueError(f"{path} line {where}: malformed CSV: {reason}")
+
+    while i < n:
+        start = line
+        fields: list[tuple[str, bool]] = []
+        while True:
+            if i < n and text[i] == '"':
+                i += 1
+                buf: list[str] = []
+                while True:
+                    if i >= n:
+                        raise bad(f"{start}-{line}" if line != start
+                                  else str(start),
+                                  "unterminated quoted field")
+                    ch = text[i]
+                    if ch == '"':
+                        if i + 1 < n and text[i + 1] == '"':
+                            buf.append('"')
+                            i += 2
+                            continue
+                        i += 1
+                        break
+                    if ch == "\r":
+                        buf.append(ch)
+                        i += 1
+                        if i < n and text[i] == "\n":
+                            buf.append("\n")
+                            i += 1
+                        line += 1
+                        continue
+                    if ch == "\n":
+                        line += 1
+                    buf.append(ch)
+                    i += 1
+                if i < n and text[i] not in ",\r\n":
+                    raise bad(str(line),
+                              "unexpected character after closing quote")
+                fields.append(("".join(buf), True))
+            else:
+                j = i
+                while j < n and text[j] not in ",\r\n":
+                    if text[j] == '"':
+                        raise bad(str(line), "quote inside an unquoted field")
+                    j += 1
+                fields.append((text[i:j], False))
+                i = j
+            if i < n and text[i] == ",":
+                i += 1
+                continue
+            break
+        if i < n:
+            if text[i] == "\r":
+                i += 1
+                if i < n and text[i] == "\n":
+                    i += 1
+            else:
+                i += 1
+            line += 1
+        if len(fields) == 1 and fields[0] == ("", False):
+            continue
+        yield start, [value for value, _ in fields]
+
+
+def read_rows(path: str) -> list[ParsedRow]:
+    rows: list[ParsedRow] = []
+    header: list[str] | None = None
+    index: dict[str, int] = {}
+    currency_at: int | None = None
+    for start, record in _records(_decode(path), path):
+        if header is None:
+            header = record
+            _require_columns(header, path)
+            index = {name: header.index(col) for name, col in COLUMNS.items()}
+            currency_at = _currency_index(header, path)
+            continue
+        try:
+            rows.append(_parse_record(record, header, index, currency_at))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"{path} line {start}: {exc}") from None
+    if header is None:
+        raise ValueError(f"{path}: file is empty")
+    return rows
+
+
+def _parse_record(record: list[str], header: list[str],
+                  index: dict[str, int], currency_at: int | None) -> ParsedRow:
+    if len(record) < len(header):
+        raise ValueError(
+            f"row has {len(record)} field(s), header has {len(header)}: "
+            f"missing field(s)"
+        )
+    if len(record) > len(header):
+        raise ValueError(
+            f"row has more fields than the header: surplus "
+            f"{record[len(header):]!r}. Usually an unquoted thousands "
+            f"separator in the {COLUMNS['amount']!r} column, which would "
+            f"silently truncate the amount to its leading digits."
+        )
+    if currency_at is not None:
+        declared = record[currency_at].strip()
+        if declared and declared.upper() != CURRENCY:
+            raise ValueError(
+                f"unsupported currency {declared!r} in the "
+                f"{CURRENCY_COLUMN!r} column; only USD is supported"
+            )
+    when = datetime.strptime(record[index["date"]].strip(), DATE_FORMAT).date()
+    return ParsedRow(
+        when, record[index["description"]], clean_amount(record[index["amount"]])
+    )
+
+
+def _currency_index(header: list[str], path: str) -> int | None:
+    found = [i for i, name in enumerate(header)
+             if name.strip().casefold() == CURRENCY_COLUMN.casefold()]
+    if len(found) > 1:
+        names = [header[i] for i in found]
+        raise ValueError(
+            f"{path} line 1: duplicate column(s) {names} "
+            f"(compared ignoring case and surrounding spaces)"
+        )
+    return found[0] if found else None
+
+
+def _require_columns(fieldnames: list[str] | None, path: str) -> None:
     present = set(fieldnames or ())
     missing = [column for column in COLUMNS.values() if column not in present]
     if missing:
@@ -405,23 +534,7 @@ def _require_columns(fieldnames: list[str] | None, path: str) -> None:
             f"{path}: missing column(s) {missing}. Found {sorted(present)}. "
             f"Adjust COLUMNS in adapters/csv_source.py for this bank's export."
         )
-
-
-def _require_no_extra_fields(row: dict) -> None:
-    """A row with more fields than the header is a 1000x error, not a warning.
-
-    The way this happens in practice: the export writes a thousands separator
-    into an UNQUOTED amount, so `...,COSTCO,-$1,204.77` parses as four fields.
-    Amount becomes "-$1" and "204.77" lands in the surplus bucket. Nothing
-    raises -- `clean_amount("-$1")` is a perfectly valid 100 cents -- and a
-    $1,204.77 charge renders as $1.00 on a dashboard that looks entirely
-    healthy. It is precisely the class of failure a render cannot show you, so
-    it has to fail here.
-    """
-    if row.get(_EXTRA):
-        raise ValueError(
-            f"row has more fields than the header: surplus {row[_EXTRA]!r}. "
-            f"Usually an unquoted thousands separator in the "
-            f"{COLUMNS['amount']!r} column, which would silently truncate the "
-            f"amount to its leading digits."
-        )
+    watched = list(COLUMNS.values())
+    duplicated = sorted({c for c in watched if (fieldnames or []).count(c) > 1})
+    if duplicated:
+        raise ValueError(f"{path} line 1: duplicate column(s) {duplicated}")

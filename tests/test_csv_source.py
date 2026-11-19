@@ -378,3 +378,83 @@ def test_the_noise_is_not_flagged_as_recurring(source):
 
     merchants = {c.merchant for c in find_recurring(source.fetch_transactions().added)}
     assert merchants == {"Hulu"}
+
+
+@pytest.mark.parametrize("cell, expected", [
+    ("USD -3.50", 350),
+    ("-3.50 USD", 350),
+    ("-USD 3.50", 350),
+    ("+5.00", -500),
+])
+def test_explicit_usd_forms_are_accepted(cell, expected):
+    assert clean_amount(cell) == expected
+
+
+@pytest.mark.parametrize("cell", ["1USD2.34", "-1,23", "1,2345.00", "USD -3.50 USD", "--5", "$-$5"])
+def test_malformed_syntax_is_rejected_before_any_stripping(cell):
+    with pytest.raises(ValueError, match="malformed amount syntax"):
+        clean_amount(cell)
+
+
+@pytest.mark.parametrize("cell", ["EUR -5.00", "-5.00 GBP", "-€5.00", "£5"])
+def test_foreign_currency_is_a_currency_error(cell):
+    with pytest.raises(ValueError, match="unsupported currency"):
+        clean_amount(cell)
+
+
+def test_dollar_sign_before_the_minus_is_a_charge():
+    assert clean_amount("$-5.00") == 500
+    assert clean_amount("-$5.00") == 500
+
+
+@pytest.mark.parametrize("cell, cents", [
+    ("-92233720368547758.07", 9223372036854775807),
+    ("92233720368547758.08", -9223372036854775808),
+])
+def test_signed_boundaries_are_accepted(cell, cents):
+    assert clean_amount(cell) == cents
+
+
+@pytest.mark.parametrize("cell", ["92233720368547758.09", "-92233720368547758.08"])
+def test_out_of_range_is_rejected(cell):
+    with pytest.raises(ValueError, match="outside the supported range"):
+        clean_amount(cell)
+
+
+@pytest.mark.parametrize("pad", [1, 50_000])
+def test_outer_whitespace_is_trimmed_and_inner_forms_survive(pad):
+    space = " " * pad
+    assert clean_amount(f"{space}$-5.00{space}") == 500
+    assert clean_amount(f"{space}-$ 5.00{space}") == 500
+    assert clean_amount(f"{space}USD -3.50{space}") == 350
+
+
+def test_long_whitespace_then_junk_is_rejected():
+    with pytest.raises(ValueError, match="malformed amount syntax"):
+        clean_amount(" " * 100_000 + "!")
+    with pytest.raises(ValueError, match="malformed amount syntax"):
+        clean_amount("-" + " " * 100_000 + "!")
+
+
+def test_to_cents_never_rounds_past_decimal_context_precision():
+    from core.money import to_cents
+
+    with pytest.raises(ValueError, match="more precision"):
+        to_cents("1.000000000000000000000000000001")
+    assert to_cents("1.5000000000000000000000000000") == 150
+
+
+def test_to_cents_is_exact_for_underflow_zero_and_wide_trailing_zeros():
+    from core.money import to_cents
+
+    with pytest.raises(ValueError, match="more precision"):
+        to_cents("0." + "0" * 1_000_100 + "1")
+    assert to_cents("0." + "0" * 1_000_100) == 0
+    assert to_cents("-0.00") == 0
+    assert to_cents("1." + "0" * 5000) == 100
+    assert to_cents("-1.5", "USD") == -150
+    assert to_cents("1000", "JPY") == 1000
+    assert to_cents("1.234", "KWD") == 1234
+    assert to_cents(5) == 500
+    with pytest.raises(ValueError):
+        to_cents("1.5", "JPY")

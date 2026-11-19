@@ -57,6 +57,8 @@ class SaveResult(NamedTuple):
     deleted: int = 0
     unmatched: tuple[str, ...] = ()
     superseded: int = 0
+    new: int = 0
+    existing: int = 0
 
 
 class DeleteResult(NamedTuple):
@@ -185,6 +187,21 @@ def save_transactions(
     return len(transactions)
 
 
+def count_stored(
+    conn: sqlite3.Connection, transactions: Sequence[Transaction]
+) -> int:
+    ids = sorted({t.id for t in transactions})
+    found = 0
+    for start in range(0, len(ids), DELETE_CHUNK):
+        chunk = ids[start:start + DELETE_CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        found += conn.execute(
+            f"SELECT COUNT(*) FROM transactions WHERE id IN ({placeholders})",
+            chunk,
+        ).fetchone()[0]
+    return found
+
+
 def delete_transactions(
     conn: sqlite3.Connection, user_id: str, ids: Sequence[str]
 ) -> DeleteResult:
@@ -255,6 +272,7 @@ def save(
             save_connection(conn, user_id, connection, cursor=cursor,
                             fetched_at=when)
         save_accounts(conn, user_id, accounts)
+        existing = count_stored(conn, transactions)
         save_transactions(conn, user_id, transactions)
         deletion = delete_transactions(conn, user_id, removed)
         settled = delete_transactions(
@@ -271,6 +289,8 @@ def save(
         deletion.deleted,
         deletion.unmatched,
         settled.deleted,
+        len({t.id for t in transactions}) - existing,
+        existing,
     )
 
 

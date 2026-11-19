@@ -107,14 +107,23 @@ def to_cents(amount: str | int | Decimal, currency: str = "USD") -> int:
             f"Decimal"
         )
 
-    scaled = value * (10 ** digits)
-    if scaled != scaled.to_integral_value():
+    if not value.is_finite():
+        raise ValueError(f"malformed amount {amount!r}")
+    sign, coefficient, exponent = value.as_tuple()
+    end = len(coefficient)
+    while end > 0 and coefficient[end - 1] == 0:
+        end -= 1
+    if end == 0:
+        return 0
+    exponent += len(coefficient) - end
+    if exponent + digits < 0:
         raise ValueError(
             f"{amount!r} has more precision than {currency.upper()} allows "
             f"({digits} decimal place{'' if digits == 1 else 's'}); refusing "
             f"to round"
         )
-    return int(scaled)
+    cents = int(Decimal((0, coefficient[:end], exponent + digits)))
+    return -cents if sign else cents
 
 
 def format_money(cents: int, currency: str = "USD") -> str:
