@@ -166,3 +166,19 @@ def test_round_trip_cents_first(cents, currency):
         body = "-" + body
 
     assert to_cents(body, currency) == cents
+
+
+def test_to_cents_is_exact_beyond_the_integer_string_limit():
+    digits = 4301
+    whole = (10 ** digits - 1) // 9
+    assert whole > 10 ** 4300
+
+    as_string = to_cents("1" * digits)
+    as_decimal = to_cents(Decimal("1" * digits))
+    as_int = to_cents(whole)
+
+    assert as_string == as_decimal == as_int == whole * 100
+    assert as_string != 0
+    assert to_cents("-" + "1" * digits) == -whole * 100
+    assert to_cents(whole, "JPY") == whole
+    assert to_cents(whole, "KWD") == whole * 1000

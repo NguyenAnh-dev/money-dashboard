@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Next assignment: Task 2a, explicit CSV import account selection.** Step 1 (baseline investigation) and Task 1a (offline test startup) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Next assignment: Task 2b, CSV import preview and validation.** Step 1 (baseline investigation), Task 1a (offline test startup), and Task 2a (explicit CSV import account selection) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -39,6 +39,7 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Add a local command accepting a file and a stable account identifier. Reuse the adapter, the local user, and the connection-scoped save path. Choosing a file or renaming it must not change the destination account.
 - **Accept when** a user can import the sample into account A and the three-row Netflix example below into B. A holds 19 rows and B holds 3. Identical row content on different cards has distinct stored IDs. Explicit CSV import fetches only the requested file.
 - **Verify** through the new CLI on a fresh database. Query stored accounts and transaction owners, repeat with a renamed copy, and exercise the existing no-argument workflow with a synthetic source. [Selector](../data_source.py) · [Sync entry points](../sync.py)
+- **Accepted.** Commit `98aff59` adds `python import_csv.py FILE --account ACCOUNT_ID`. Codex verified that the sample stored 19 rows in A and the Netflix example stored 3 in B, transaction ownership matched account ownership, identical rows across cards had distinct IDs, and a renamed copy preserved IDs and destinations. The CLI imported only the requested file, and no-argument sync still worked with the synthetic source. The final offline suite reported **566 passed, 1 skipped, 1 warning**, including coverage for rejected empty arguments, `.env` database selection, and literal account names. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate and whitespace checks passed.
 
 ### 2b. Preview and validate before opening the database for writes
 
@@ -113,4 +114,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Task 2a awaits the owner’s assignment. Once assigned, Claude implements Task 2a only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 2b awaits the owner’s assignment. Once assigned, Claude implements Task 2b only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
