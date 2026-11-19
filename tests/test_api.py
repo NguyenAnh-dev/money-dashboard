@@ -707,6 +707,18 @@ def test_the_recurring_endpoint_keeps_cards_apart_and_shows_evidence(client, db)
     ]
 
 
+def test_the_recurring_endpoint_keeps_the_earliest_day_for_month_end_charges(client, db):
+    user_id = _user(db)
+    card = _account("m_conn", "acc_m", name="Card M")
+    days = [date(2026, 11, 30), date(2026, 12, 31), date(2027, 1, 31), date(2027, 2, 28)]
+    repository.save(db, user_id, [card], [
+        _transaction(card, f"m{i}", date=d, merchant="Netflix", amount_cents=1799)
+        for i, d in enumerate(days)
+    ])
+    rows = _as(client, sessions.create_session(db, user_id)).get("/recurring").json()
+    assert len(rows) == 1 and rows[0]["day"] == 28
+
+
 def test_recurring_never_crosses_owners(client, db):
     months = [date(2026, 5, 10), date(2026, 6, 10), date(2026, 7, 11)]
     seeded = {}

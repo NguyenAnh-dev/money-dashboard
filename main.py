@@ -1,4 +1,5 @@
 import os
+from datetime import date
 
 from rich.console import Console
 from rich.table import Table
@@ -9,7 +10,8 @@ from rich.text import Text
 from core import repository, store, users
 from core.money import format_money as dollars
 from import_csv import safe
-from insights import total_balance, spending_by_category, find_recurring
+from insights import (total_balance, spending_by_category, find_recurring,
+                      estimate_renewals, latest_import_dates, anchor_day)
 
 # NOTE: there is deliberately no module-level `console`. The rendering target is
 # threaded through as an argument so tests/check_baseline.py can pin width,
@@ -131,9 +133,10 @@ def show_subscriptions(transactions, console, accounts=(), decisions=None):
         history = Text("\n".join(f"{d} {dollars(cents)}"
                                  for d, cents in c.evidence))
         label = f"{c.merchant} (tracked)" if status == "tracked" else c.merchant
+        day = (anchor_day(d for d, _ in c.evidence)
+               if status == "tracked" else c.day)
         table.add_row(Text(label), Text(names.get(c.account_id, c.account_id)),
-                      dollars(c.latest_cents), str(c.day),
-                      change, history)
+                      dollars(c.latest_cents), str(day), change, history)
 
     console.print(table)
 
@@ -154,6 +157,29 @@ def show_price_increases(warnings, console, accounts=()):
                       Text(safe(names.get(w.account_id, w.account_id))),
                       str(w.date), dollars(w.old_cents), dollars(w.new_cents),
                       f"[red]+{dollars(w.delta_cents)}[/red]")
+    console.print(table)
+
+
+def show_renewals(renewals, console, accounts=()):
+    if not renewals:
+        return
+    names = account_labels(accounts)
+    console.print()
+    table = Table(title="Upcoming Renewals (estimated)", title_style="bold",
+                  header_style="bold cyan")
+    for col in ("Merchant", "Account", "Expected"):
+        table.add_column(col)
+    table.add_column("Amount", justify="right")
+    table.add_column("Latest import")
+    table.add_column("Status")
+    for r in renewals:
+        status = ("[yellow]no charge seen - import updated history[/yellow]"
+                  if r.overdue else "")
+        table.add_row(Text(safe(r.merchant)),
+                      Text(safe(names.get(r.account_id, r.account_id))),
+                      str(r.expected), dollars(r.cents),
+                      str(r.latest_import) if r.latest_import else "none",
+                      status)
     console.print(table)
 
 
@@ -181,13 +207,14 @@ def format_synced_at(stamp):
     return stamp.replace("T", " ")[:16]
 
 
-def main(console=None):
+def main(console=None, today=None):
     """Render the dashboard.
 
     `console` is injected by the baseline gate. Left as None it builds one that
     adapts to the real terminal, which is what a human wants.
     """
     console = console or Console()
+    today = today or date.today()
 
     path = store.db_path()
 
@@ -199,12 +226,14 @@ def main(console=None):
 
     conn = store.open_db(path)
     try:
+        conn.execute("BEGIN")
         accounts = repository.load_accounts(conn, user_id)
         transactions = repository.load_transactions(conn, user_id)
         synced_at = repository.last_synced_at(conn)
         providers = repository.stored_providers(conn, user_id)
         decisions = repository.load_decisions(conn, user_id)
         increases = repository.load_price_increases(conn, user_id)
+        tracked = repository.load_tracked_charges(conn, user_id)
     finally:
         conn.close()
 
@@ -221,6 +250,9 @@ def main(console=None):
     console.print()
     show_subscriptions(transactions, console, accounts, decisions)
     show_price_increases(increases, console, accounts)
+    show_renewals(
+        estimate_renewals(tracked, latest_import_dates(transactions), today),
+        console, accounts)
     console.print()
     show_spending(transactions, console)
     console.print()

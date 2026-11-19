@@ -324,6 +324,18 @@ CREATE TABLE IF NOT EXISTS subscription_price_increases (
     CHECK (new_cents > old_cents)
 );
 
+CREATE TABLE IF NOT EXISTS subscription_price_acknowledged (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    charge_id       TEXT NOT NULL,
+    acknowledged_at TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(merchant) > 0),
+    CHECK (length(acknowledged_at) = 19)
+);
+
 -- Each index exists for a query we already know we make.
 CREATE INDEX IF NOT EXISTS idx_txn_account     ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_txn_date        ON transactions(date);

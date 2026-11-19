@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import sys
 
 from core import repository, store, users
@@ -32,6 +34,35 @@ def list_lines(conn, user_id) -> list[str]:
             f"account {safe(names.get(account_id, account_id))}  [id: {safe(account_id)}]"
         )
     return lines
+
+
+def event_selector(account_id: str, merchant: str, charge_id: str) -> str:
+    raw = json.dumps([account_id, merchant, charge_id], ensure_ascii=True)
+    return base64.urlsafe_b64encode(raw.encode("ascii")).decode("ascii").rstrip("=")
+
+
+def parse_selector(token: str) -> tuple[str, str, str]:
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        values = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+        if (isinstance(values, list) and len(values) == 3
+                and all(isinstance(v, str) for v in values)):
+            for value in values:
+                value.encode("utf-8")
+            return tuple(values)
+    except (ValueError, UnicodeError):
+        pass
+    raise LookupError("not a valid event selector; copy it from 'warnings'")
+
+
+def warning_lines(conn, user_id) -> list[str]:
+    names = account_labels(repository.load_accounts(conn, user_id))
+    return [
+        f"{w.date}  {safe(w.merchant)}  {format_money(w.old_cents)} -> "
+        f"{format_money(w.new_cents)}  account {safe(names.get(w.account_id, w.account_id))}"
+        f"  [event: {event_selector(w.account_id, w.merchant, w.charge_id)}]"
+        for w in repository.load_price_increases(conn, user_id)
+    ]
 
 
 def decide(conn, user_id, action: str, account_id: str, merchant: str) -> str:
@@ -69,6 +100,12 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--account", required=True, help="stored account id")
         p.add_argument("--merchant", required=True)
+    sub.add_parser("warnings", help="show unacknowledged price increases")
+    ack = sub.add_parser("acknowledge", help="clear one price increase warning")
+    ack.add_argument("--event", help="selector printed by 'warnings'")
+    ack.add_argument("--account", help="stored account id")
+    ack.add_argument("--merchant")
+    ack.add_argument("--charge", help="charge id")
     args = parser.parse_args(argv)
 
     for stream in (sys.stdout, sys.stderr):
@@ -83,6 +120,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "list":
             lines = list_lines(conn, user_id)
             print("\n".join(lines) if lines else "no candidates")
+            return 0
+        if args.action == "warnings":
+            lines = warning_lines(conn, user_id)
+            print("\n".join(lines) if lines else "no price increases")
+            return 0
+        if args.action == "acknowledge":
+            try:
+                if args.event:
+                    if args.account or args.merchant or args.charge:
+                        raise LookupError("use --event alone, or all of "
+                                          "--account, --merchant and --charge")
+                    account, merchant, charge = parse_selector(args.event)
+                elif args.account and args.merchant and args.charge:
+                    account, merchant, charge = (
+                        args.account, args.merchant, args.charge)
+                else:
+                    raise LookupError("give --event, or all of --account, "
+                                      "--merchant and --charge")
+                fresh = repository.acknowledge_increase(
+                    conn, user_id, account, merchant, charge)
+            except (LookupError, repository.UnknownAccount) as exc:
+                print(f"acknowledge FAILED: {safe(exc)}", file=sys.stderr)
+                return 1
+            print(f"{'acknowledged' if fresh else 'already acknowledged'}: "
+                  f"{safe(merchant)} on {safe(account)}")
             return 0
         try:
             outcome = decide(conn, user_id, args.action, args.account, args.merchant)

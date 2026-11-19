@@ -55,6 +55,14 @@ Only `tracked` subscriptions warn. Dismissed ones are hidden and keep their rows
 - A subscription tracked with no eligible charges at upgrade has no watch row, and is initialised when history first arrives.
 - A real v7 or v6 file cannot hold decisions, so those chains just reach v10 (v6 still re-scopes transaction ids in its own step). Decisions and transaction ids are preserved on every path.
 
+## Acknowledging (Task 5b)
+
+`subscription_price_acknowledged(user, account, merchant, charge_id, acknowledged_at)` is additive, created by `CREATE TABLE IF NOT EXISTS`, so there is no version bump and no data step (nothing to recover). It is keyed by the introducing charge, the same key as the warning, so a later rise is a different key and stays open. The row is kept apart from `subscription_price_increases` so reconcile deleting and re-deriving a warning does not lose the acknowledgement. Restore clears it with the other price tables, so tracking again starts fresh.
+
+- `python subscriptions.py warnings` lists open warnings, each ending in `[event: TOKEN]`. Copy the token: `python subscriptions.py acknowledge --event TOKEN` clears that warning. The token is the account id, merchant and charge id encoded as ASCII URL-safe base64, so it works when the merchant holds hidden or bidirectional characters that the display escapes. Owner scoping and the tracked-event check still run on the decoded values. `--account A --merchant M --charge C` remains for plain values, but cannot be combined with `--event`. The check and the write are one statement inside one transaction, so a restore on another connection cannot slip between them. A second call reports `already acknowledged` and changes nothing. An unknown charge, an untracked or dismissed subscription, or another user's account is refused.
+- `load_price_increases` hides acknowledged events (`include_acknowledged=True` shows them). Dismissed subscriptions were already hidden.
+- Tests: `tests/test_price_acknowledge.py`, including fresh, v7 and v6 files.
+
 ## Rendering
 
 Merchant and account labels go through `import_csv.safe` at render time. Stored names and ids are untouched.

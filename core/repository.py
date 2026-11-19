@@ -669,6 +669,7 @@ PRICE_TABLES = (
     "subscription_price_watch",
     "subscription_price_increases",
     "subscription_price_corrected",
+    "subscription_price_acknowledged",
 )
 
 
@@ -676,6 +677,40 @@ def _eligible_charges(
     conn: sqlite3.Connection, account_id: str, merchant: str
 ) -> list[sqlite3.Row]:
     return conn.execute(ELIGIBLE_SQL, (account_id, merchant)).fetchall()
+
+
+def _charge_order(ledger: dict):
+    def order(c):
+        if c["id"] in ledger:
+            return (c["date"], 0, ledger[c["id"]])
+        return (c["date"], 1, c["row_order"])
+    return order
+
+
+def load_tracked_charges(
+    conn: sqlite3.Connection, user_id: str
+) -> dict[tuple[str, str], list[tuple[date, int]]]:
+    out = {}
+    for (account_id, merchant), status in load_decisions(conn, user_id).items():
+        if status != TRACKED:
+            continue
+        ledger = {
+            row["charge_id"]: row["seq"] for row in conn.execute(
+                "SELECT charge_id, seq FROM subscription_price_observed "
+                "WHERE user_id = ? AND account_id = ? AND merchant = ?",
+                (user_id, account_id, merchant))
+        }
+        owned = conn.execute(
+            "SELECT t.id, t.date, t.amount_cents, t.rowid AS row_order "
+            "FROM transactions t JOIN connections c "
+            "  ON c.provider = t.provider AND c.connection_id = t.connection_id "
+            "WHERE c.user_id = ? AND t.account_id = ? AND t.merchant = ? "
+            "AND t.pending = 0 AND t.amount_cents > 0 AND t.kind <> 'transfer'",
+            (user_id, account_id, merchant)).fetchall()
+        charges = sorted(owned, key=_charge_order(ledger))
+        out[(account_id, merchant)] = [
+            (_to_date(c["date"]), c["amount_cents"]) for c in charges]
+    return out
 
 
 def _record_increase(
@@ -729,12 +764,7 @@ def scan_watch(
     if not new:
         return
 
-    def order(c):
-        if c["id"] in ledger:
-            return (c["date"], 0, ledger[c["id"]])
-        return (c["date"], 1, c["row_order"])
-
-    ordered = sorted(charges, key=order)
+    ordered = sorted(charges, key=_charge_order(ledger))
     new_ids = {c["id"] for c in new}
     if cutoff is None:
         if len(ordered) >= 2 and ordered[-1]["amount_cents"] > ordered[-2]["amount_cents"]:
@@ -850,8 +880,45 @@ def scan_price_increases(
         scan_watch(conn, user_id, row["account_id"], row["merchant"])
 
 
+def acknowledge_increase(
+    conn: sqlite3.Connection, user_id: str, account_id: str, merchant: str,
+    charge_id: str, acknowledged_at: datetime | None = None,
+) -> bool:
+    """Clear one warning. True if it was open, False if already cleared."""
+    if not owns_account(conn, user_id, account_id):
+        raise UnknownAccount(account_id)
+    key = (user_id, account_id, merchant, charge_id)
+    stamp = (acknowledged_at or datetime.now()).replace(microsecond=0).isoformat()
+    open_event = (
+        "FROM subscription_price_increases e "
+        "JOIN subscription_decisions d ON d.user_id = e.user_id "
+        " AND d.account_id = e.account_id AND d.merchant = e.merchant "
+        "WHERE e.user_id = ? AND e.account_id = ? AND e.merchant = ? "
+        "AND e.charge_id = ? AND d.decision = 'tracked'"
+    )
+    # One statement checks the event and writes the row, so a restore on
+    # another connection cannot land between the two. Python opens the write
+    # transaction before this INSERT, which also holds the lock for the
+    # follow-up read below.
+    with conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO subscription_price_acknowledged "
+            "(user_id, account_id, merchant, charge_id, acknowledged_at) "
+            f"SELECT e.user_id, e.account_id, e.merchant, e.charge_id, ? {open_event}",
+            (stamp, *key),
+        )
+        if cursor.rowcount > 0:
+            return True
+        still_open = conn.execute(f"SELECT 1 {open_event}", key).fetchone()
+    if still_open is None:
+        raise LookupError(
+            f"no price increase for {charge_id!r} on {merchant!r} "
+            f"on account {account_id!r}")
+    return False
+
+
 def load_price_increases(
-    conn: sqlite3.Connection, user_id: str
+    conn: sqlite3.Connection, user_id: str, include_acknowledged: bool = False
 ) -> list[PriceIncrease]:
     rows = conn.execute(
         "SELECT e.account_id, e.merchant, e.charge_id, e.charge_date, "
@@ -859,7 +926,11 @@ def load_price_increases(
         "JOIN subscription_decisions d ON d.user_id = e.user_id "
         " AND d.account_id = e.account_id AND d.merchant = e.merchant "
         "WHERE e.user_id = ? AND d.decision = 'tracked' "
-        "ORDER BY e.charge_date DESC, e.merchant, e.account_id, e.charge_id",
+        + ("" if include_acknowledged else
+           "AND NOT EXISTS (SELECT 1 FROM subscription_price_acknowledged a "
+           "WHERE a.user_id = e.user_id AND a.account_id = e.account_id "
+           "AND a.merchant = e.merchant AND a.charge_id = e.charge_id) ")
+        + "ORDER BY e.charge_date DESC, e.merchant, e.account_id, e.charge_id",
         (user_id,),
     )
     return [

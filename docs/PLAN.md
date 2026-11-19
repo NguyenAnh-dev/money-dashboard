@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Task 5b (acknowledge the specific increase) awaits assignment.** Step 1 (baseline investigation), Task 1a (offline test startup), Tasks 2a–2d (CSV import and sync failure reporting), Task 3 (per-account candidate detection), Task 4 (subscription decisions), and Task 5a (price-increase warnings) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Task 7a (make terminal amounts and warnings readable) awaits assignment.** Step 1 (baseline investigation), Task 1a (offline test startup), Tasks 2a–2d (CSV import and sync failure reporting), Task 3 (per-account candidate detection), Task 4 (subscription decisions), Task 5a (price-increase warnings), Task 5b (acknowledge the specific increase), and Task 6 (estimate the next monthly renewal) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -88,12 +88,14 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Add a local acknowledge action and persist acknowledgement for that event. Dismissed subscriptions should have no visible warnings.
 - **Accept when** acknowledging the same event twice is harmless. Reopening and reimporting leave it cleared. A later rise on the same subscription remains independently actionable.
 - **Verify** by acknowledging the example warning, exiting, reopening, reimporting, and introducing another increase. Check both stored state and the warning list. Apply the migration checks from Task 4 to any new schema change.
+- **Accepted.** Claude added local commands to list open warnings and acknowledge a specific event using a copyable selector. Acknowledgements are stored by owner, account, merchant, and introducing charge in a new table added on open at schema v11. The acknowledgement write checks that the event is still tracked in the same SQL statement. The selector handles valid Unicode and rejects unpaired surrogates before SQLite receives them. Codex independently verified in separate CLI processes that acknowledging the $2.00 example twice leaves one acknowledgement row, reopening and reimporting keep the warning cleared, a later rise remains actionable, and dismissal hides warnings and blocks acknowledgement. A simulated pre-5b v11 database preserved transaction IDs and passed the foreign-key check. The offline suite covered fresh, v7, and v6 databases and reported **768 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate passed with byte-identical output, and staged and unstaged whitespace checks passed. [Implementation notes](PRICE_INCREASES.md#acknowledging-task-5b) · [Regression tests](../tests/test_price_acknowledge.py)
 
 ### 6. Estimate the next monthly renewal
 
 - **Change.** Use the observed billing day and latest posted amount for tracked subscriptions. Show estimates due today through seven calendar days ahead, inclusive, alongside that account’s latest imported transaction date. Clamp the billing day to the end of shorter months.
 - **Accept when** the example, viewed on November 5, estimates November 12 at $17.99. After the expected date passes without a new charge, show that updated history is needed. Old history must not keep generating future renewals.
 - **Verify** using a fixed local date for today, day seven, day eight, month-end, a stale statement, and a subsequent posted renewal. Two opens on the same day must agree.
+- **Accepted.** Claude added dashboard renewal estimates for tracked subscriptions using eligible posted charges and each account’s latest imported transaction date. The dashboard handles month-end clamping, short posting delays, same-day charge order, and missed renewals. Codex independently verified the acceptance cases, the calendar boundaries, and a coherent dashboard snapshot during a concurrent import. The offline suite reported **791 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate passed with byte-identical output, and staged and unstaged whitespace checks passed. [Implementation notes](RENEWALS.md) · [Regression tests](../tests/test_renewals.py)
 
 ### 7a. Make terminal amounts and warnings readable
 
@@ -125,4 +127,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Task 5b awaits the owner’s assignment. Once assigned, Claude implements Task 5b only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 7a awaits the owner’s assignment. Once assigned, Claude implements Task 7a only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
