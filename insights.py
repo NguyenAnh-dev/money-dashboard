@@ -11,12 +11,14 @@ MAX_GAP_DAYS = 35
 @dataclass
 class RecurringCharge:
     merchant: str
+    account_id: str
     latest_cents: int           # what it costs now
     previous_cents: int | None  # last amount that DIFFERS from latest;
                                 # None means the price has never moved
     day: int                    # billing anchor: earliest day-of-month seen
     last_date: date
     occurrences: int
+    evidence: tuple = ()        # ((date, cents), ...) oldest first, for review
 
     # Derived, so the CLI and (later) the API report a price change the same
     # way instead of each recomputing it in its own display loop.
@@ -66,7 +68,7 @@ def spending_by_category(transactions):
 def find_recurring(transactions):
     by_merchant = {}
     for txn in transactions:
-        if txn.amount_cents < 0:      # income, not a charge
+        if txn.amount_cents <= 0:     # income or a zero entry, not a charge
             continue
         # A pending charge's amount is still provisional -- a card auth posts at
         # a different number all the time (tip, fuel hold, currency). Include it
@@ -83,10 +85,10 @@ def find_recurring(transactions):
         # "Uncategorized".
         if txn.kind is TransactionKind.TRANSFER:
             continue
-        by_merchant.setdefault(txn.merchant, []).append(txn)
+        by_merchant.setdefault((txn.account_id, txn.merchant), []).append(txn)
 
     found = []
-    for merchant, txns in by_merchant.items():
+    for (account_id, merchant), txns in by_merchant.items():
         # Year matters: over a 12+ month Plaid pull, a bare month number would
         # merge May 2026 with May 2027 and overstate the evidence.
         months = {(txn.date.year, txn.date.month) for txn in txns}
@@ -119,11 +121,13 @@ def find_recurring(transactions):
 
         found.append(RecurringCharge(
             merchant=merchant,
+            account_id=account_id,
             latest_cents=amounts[-1],
             previous_cents=earlier[-1] if earlier else None,
             day=min(days),
             last_date=txns[-1].date,
             occurrences=len(txns),
+            evidence=tuple((t.date, t.amount_cents) for t in txns),
         ))
 
-    return sorted(found, key=lambda c: c.latest_cents, reverse=True)
+    return sorted(found, key=lambda c: (-c.latest_cents, c.merchant, c.account_id))

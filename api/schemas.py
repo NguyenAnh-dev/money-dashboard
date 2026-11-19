@@ -67,8 +67,14 @@ class CategorySpendOut(BaseModel):
     amount_cents: int
 
 
+class RecurringEvidenceOut(BaseModel):
+    date: date
+    amount_cents: int
+
+
 class RecurringChargeOut(BaseModel):
     merchant: str
+    account_id: str
     latest_cents: int
     previous_cents: int | None
     delta_cents: int | None
@@ -76,11 +82,15 @@ class RecurringChargeOut(BaseModel):
     day: int
     last_date: date
     occurrences: int
+    evidence: list[RecurringEvidenceOut]
 
     @classmethod
     def of(cls, charge) -> "RecurringChargeOut":
         return cls(
             merchant=charge.merchant,
+            account_id=charge.account_id,
+            evidence=[RecurringEvidenceOut(date=d, amount_cents=c)
+                      for d, c in charge.evidence],
             latest_cents=charge.latest_cents,
             previous_cents=charge.previous_cents,
             delta_cents=charge.delta_cents,

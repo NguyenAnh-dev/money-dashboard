@@ -68,14 +68,51 @@ def show_spending(transactions, console):
     console.print(table)
 
 
-def show_subscriptions(transactions, console):
+def account_labels(accounts):
+    accounts = sorted(accounts, key=lambda a: a.id)
+    shared = {}
+    for a in accounts:
+        name = a.name.rstrip()
+        shared[name] = shared.get(name, 0) + 1
+
+    first = {}
+    for a in accounts:
+        if shared[a.name.rstrip()] > 1 and a.mask:
+            first[a.id] = f"{a.name.rstrip()} ({a.mask})"
+        else:
+            first[a.id] = a.name.rstrip()
+
+    seen = {}
+    for label in first.values():
+        seen[label] = seen.get(label, 0) + 1
+
+    labels = {}
+    for a in accounts:
+        if seen[first[a.id]] == 1:
+            labels[a.id] = first[a.id]
+
+    used = set(labels.values())
+    for a in accounts:
+        if a.id in labels:
+            continue
+        label = f"{first[a.id]} [id: {a.id}]"
+        while label in used:
+            label += "'"
+        used.add(label)
+        labels[a.id] = label
+    return labels
+
+
+def show_subscriptions(transactions, console, accounts=()):
+    names = account_labels(accounts)
     table = Table(title="Recurring Charges", title_style="bold",
                   header_style="bold cyan")
     table.add_column("Merchant")
+    table.add_column("Account")
     table.add_column("Amount", justify="right")
     table.add_column("Billing day", justify="right")
-    table.add_column("Last charged")
-    table.add_column("Change", justify="right")
+    table.add_column("Change", justify="right", no_wrap=True)
+    table.add_column("Charges", no_wrap=True)
 
     for c in find_recurring(transactions):
         # direction is None when the price has never moved.
@@ -86,8 +123,11 @@ def show_subscriptions(transactions, console):
         else:
             change = ""
 
-        table.add_row(c.merchant, dollars(c.latest_cents), str(c.day),
-                      str(c.last_date), change)
+        history = Text("\n".join(f"{d} {dollars(cents)}"
+                                 for d, cents in c.evidence))
+        table.add_row(Text(c.merchant), Text(names.get(c.account_id, c.account_id)),
+                      dollars(c.latest_cents), str(c.day),
+                      change, history)
 
     console.print(table)
 
@@ -152,7 +192,7 @@ def main(console=None):
 
     show_accounts(accounts, console)
     console.print()
-    show_subscriptions(transactions, console)
+    show_subscriptions(transactions, console, accounts)
     console.print()
     show_spending(transactions, console)
     console.print()
