@@ -56,7 +56,7 @@ from core import migrations
 #: `upgrade` refuses to open a file it cannot walk forward rather than skipping
 #: the gap. Bumping this alone now fails loudly instead of orphaning every
 #: existing database. See docs/MIGRATIONS.md.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     mask              TEXT,
     available_cents   INTEGER,
     as_of             TEXT,
+    balance_known     INTEGER NOT NULL DEFAULT 1,
 
     -- typeof() is not belt-and-braces. INTEGER in SQLite is an AFFINITY: store
     -- 12.34 in that column and you get a REAL back, no error, and invariant 1
@@ -150,6 +151,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- cannot help here -- the database is a second door in, and a hand-written
     -- UPDATE never passes through it.
     CHECK (typeof(balance_cents) = 'integer'),
+    CHECK (balance_known IN (0, 1)),
     CHECK (available_cents IS NULL OR typeof(available_cents) = 'integer'),
     CHECK (length(currency) = 3 AND currency = upper(currency)),
     CHECK (provider IN ('fake', 'plaid', 'csv')),
@@ -318,6 +320,7 @@ CREATE TABLE IF NOT EXISTS subscription_price_increases (
     charge_date        TEXT NOT NULL,
     old_cents          INTEGER NOT NULL,
     new_cents          INTEGER NOT NULL,
+    history            TEXT,
 
     PRIMARY KEY (user_id, account_id, merchant, charge_id),
     CHECK (length(charge_date) = 10),

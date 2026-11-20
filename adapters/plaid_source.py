@@ -469,6 +469,7 @@ def to_account(raw: dict, item_id: str) -> Account:
         currency=currency,
         mask=raw.get("mask"),
         available_cents=available_cents,
+        balance_known=current is not None,
     )
 
 

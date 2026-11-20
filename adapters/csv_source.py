@@ -333,6 +333,7 @@ class CsvSource:
                 type=self.account.type,
                 balance_cents=self.account.balance_cents,
                 currency=CURRENCY,
+                balance_known=False,
             )
         ]
 

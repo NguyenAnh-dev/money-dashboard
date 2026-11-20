@@ -27,7 +27,7 @@ def dashboard(path, today):
 def renewals(out):
     if "Upcoming Renewals" not in out:
         return ""
-    return out.split("Upcoming Renewals")[1].split("Spending by Category")[0]
+    return out.split("Upcoming Renewals")[1].split("Recurring Charges")[0]
 
 
 def test_example_on_nov_5_estimates_nov_12_at_latest_amount(env):
@@ -143,7 +143,7 @@ def test_month_end_billing_day_matches_in_both_tables(env):
                         ("01/31/2027", "9.99"), ("02/28/2027", "9.99")])
     track(path)
     out = dashboard(path, date(2027, 3, 29))
-    table = out.split("Recurring Charges")[1].split("Upcoming Renewals")[0]
+    table = out.split("Recurring Charges")[1].split("Accounts")[0]
     assert "(tracked)" in table and " 31 " in table and " 28 " not in table
     assert "2027-03-31" in renewals(out)
 

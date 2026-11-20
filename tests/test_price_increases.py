@@ -14,7 +14,7 @@ from core import repository, store, users
 
 U = users.LOCAL_USER_ID
 ACCT = "card"
-MERCHANT = "Netflix.Com"
+MERCHANT = "Netflix"
 
 
 def stmt(tmp_path, name, rows, description="NETFLIX.COM"):
@@ -80,7 +80,7 @@ def render(path):
 
 
 def section(path):
-    return render(path).split("Price Increases")[1].split("Spending by Category")[0]
+    return render(path).split("Price Increases")[1].split("Recurring Charges")[0]
 
 
 def d(m, day=12):
@@ -114,7 +114,7 @@ def test_the_example_gives_one_dated_warning_that_flat_follow_ups_keep(env):
     text = render(path)
     assert "Price Increases" in text
     assert "$15.99" in text and "$17.99" in text and "+$2.00" in text
-    assert "2026-10-12" in text and "Netflix.Com" in text
+    assert "2026-10-12" in text and "Netflix" in text
 
 
 def test_two_increases_imported_together_are_two_events(env):
@@ -286,7 +286,7 @@ def test_v8_database_upgrades_and_still_tracks(env):
     assert ids
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [9, 10, 11]
+        assert store.init_schema(conn) == [9, 10, 11, 12, 13]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

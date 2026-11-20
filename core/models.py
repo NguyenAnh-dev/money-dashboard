@@ -197,6 +197,8 @@ class Account:
     available_cents: int | None = None   # differs from balance while charges
                                          # are still pending
     as_of: date | None = None            # a balance is a snapshot, not a fact
+    balance_known: bool = True           # False: the source supplied no balance
+                                         # and balance_cents is a placeholder
 
     def __post_init__(self) -> None:
         self.currency = _clean_currency(self.currency)

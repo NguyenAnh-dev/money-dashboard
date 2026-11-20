@@ -176,7 +176,7 @@ def test_a_v10_file_without_the_corrected_table_opens_and_gains_it(env):
     con.close()
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [11]
+        assert store.init_schema(conn) == [11, 12, 13]
     finally:
         conn.close()
     assert query(path, "SELECT count(*) FROM subscription_price_corrected")[0][0] == 0
@@ -197,7 +197,7 @@ def earlier_v10(path):
 def upgrade(path):
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [11]
+        assert store.init_schema(conn) == [11, 12, 13]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

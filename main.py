@@ -21,23 +21,48 @@ from insights import (total_balance, spending_by_category, find_recurring,
 # later built its own Console would escape all three pins.
 
 
+def balance_known(account):
+    return account.balance_known
+
+
 def show_accounts(accounts, console):
+    names = account_labels(accounts)
     table = Table(title="Accounts", title_style="bold", header_style="bold cyan")
     table.add_column("Institution")
     table.add_column("Account")
     table.add_column("Balance", justify="right")
 
     for a in accounts:
-        style = "red" if a.balance_cents < 0 else "green"
-        table.add_row(escape(a.institution), Text(a.name),
-                      f"[{style}]{dollars(a.balance_cents)}[/{style}]")
+        if balance_known(a):
+            style = "red" if a.balance_cents < 0 else "green"
+            balance = f"[{style}]{dollars(a.balance_cents)}[/{style}]"
+        else:
+            balance = "unknown"
+        table.add_row(escape(a.institution), Text(safe(a.name)), balance)
 
     console.print(table)
 
-    net = sum(a.balance_cents for a in accounts)
+    known = [a for a in accounts if balance_known(a)]
+    unknown = [a for a in accounts if not balance_known(a)]
+    net = sum(a.balance_cents for a in known)
     style = "red" if net < 0 else "green"
-    console.print(Panel(f"[{style} bold]{dollars(net)}[/{style} bold]",
-                        title="Net Worth (across all banks)", expand=False))
+    if not unknown:
+        console.print(Panel(f"[{style} bold]{dollars(net)}[/{style} bold]",
+                            title="Net Worth (across all banks)", expand=False))
+        return
+
+    body = Text()
+    if known:
+        title = "Net Worth (known balances only)"
+        body.append(dollars(net), style=f"{style} bold")
+        body.append("\nIncluded: " + ", ".join(safe(names[a.id]) for a in known))
+    else:
+        title = "Net Worth"
+        body.append("unavailable", style="bold")
+        body.append("\nNo account has a known balance.")
+    body.append("\nExcluded (balance unknown): "
+                + ", ".join(safe(names[a.id]) for a in unknown))
+    console.print(Panel(body, title=title, expand=False))
 
 
 def show_recent_transactions(transactions, console, limit=10):
@@ -46,15 +71,18 @@ def show_recent_transactions(transactions, console, limit=10):
     table.add_column("Date")
     table.add_column("Merchant")
     table.add_column("Category")
+    table.add_column("Type")
     table.add_column("Amount", justify="right")
 
     recent = sorted(transactions, key=lambda x: x.date, reverse=True)[:limit]
     for x in recent:
         if x.amount_cents < 0:
+            kind = "Credit"
             amount = f"[green]{dollars(-x.amount_cents)}[/green]"
         else:
+            kind = "Charge"
             amount = dollars(x.amount_cents)
-        table.add_row(str(x.date), x.merchant, x.category, amount)
+        table.add_row(str(x.date), x.merchant, x.category, kind, amount)
 
     console.print(table)
 
@@ -118,10 +146,12 @@ def show_subscriptions(transactions, console, accounts=(), decisions=None):
     table.add_column("Change", justify="right", no_wrap=True)
     table.add_column("Charges", no_wrap=True)
 
-    for c in find_recurring(transactions):
-        status = decisions.get((c.account_id, c.merchant))
-        if status == "dismissed":
-            continue
+    shown = [(decisions.get((c.account_id, c.merchant)), c)
+             for c in find_recurring(transactions)]
+    shown = [(status, c) for status, c in shown if status != "dismissed"]
+    shown.sort(key=lambda pair: pair[0] != "tracked")
+
+    for status, c in shown:
         # direction is None when the price has never moved.
         if c.direction == "up":
             change = f"[red]+{dollars(c.delta_cents)}[/red]"
@@ -138,14 +168,21 @@ def show_subscriptions(transactions, console, accounts=(), decisions=None):
         table.add_row(Text(label), Text(names.get(c.account_id, c.account_id)),
                       dollars(c.latest_cents), str(day), change, history)
 
-    console.print(table)
+    if shown:
+        console.print(table)
+    else:
+        console.print("[bold]Recurring Charges[/bold]")
+        console.print("  None yet. A monthly subscription needs charges in at "
+                      "least 3 different months")
+        console.print("  on the same account, about a month apart. Import more "
+                      "history with:")
+        console.print("      python import_csv.py FILE --account ACCOUNT_ID")
 
 
 def show_price_increases(warnings, console, accounts=()):
     if not warnings:
         return
     names = account_labels(accounts)
-    console.print()
     table = Table(title="Price Increases", title_style="bold",
                   header_style="bold cyan")
     for col in ("Merchant", "Account", "Date"):
@@ -164,7 +201,6 @@ def show_renewals(renewals, console, accounts=()):
     if not renewals:
         return
     names = account_labels(accounts)
-    console.print()
     table = Table(title="Upcoming Renewals (estimated)", title_style="bold",
                   header_style="bold cyan")
     for col in ("Merchant", "Account", "Expected"):
@@ -189,7 +225,11 @@ def show_no_data(console, path):
     console.print()
     console.print("  [yellow]No data yet.[/yellow] This screen reads from the "
                   "database, and nothing has been")
-    console.print("  synced into it. To fetch and store your data:")
+    console.print("  imported or synced into it. To import a bank statement CSV:")
+    console.print()
+    console.print("      [bold]python import_csv.py FILE --account ACCOUNT_ID[/bold]")
+    console.print()
+    console.print("  or, to fetch from a connected provider:")
     console.print()
     console.print("      [bold]python sync.py[/bold]")
     console.print()
@@ -246,13 +286,22 @@ def main(console=None, today=None):
                   f"[dim]v0.1 - {source_label(providers)} data[/dim]")
     console.print()
 
-    show_accounts(accounts, console)
-    console.print()
+    renewals = estimate_renewals(tracked, latest_import_dates(transactions),
+                                 today)
+    if not increases and not renewals:
+        console.print("[bold]Alerts[/bold]")
+        console.print("  No price increases or upcoming renewals. Tracked "
+                      "subscriptions appear here.")
+        console.print()
+    if increases:
+        show_price_increases(increases, console, accounts)
+        console.print()
+    if renewals:
+        show_renewals(renewals, console, accounts)
+        console.print()
     show_subscriptions(transactions, console, accounts, decisions)
-    show_price_increases(increases, console, accounts)
-    show_renewals(
-        estimate_renewals(tracked, latest_import_dates(transactions), today),
-        console, accounts)
+    console.print()
+    show_accounts(accounts, console)
     console.print()
     show_spending(transactions, console)
     console.print()

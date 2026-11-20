@@ -223,7 +223,7 @@ def test_an_earlier_v9_database_upgrades_renders_and_accepts_a_later_import(env,
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [10, 11]
+        assert store.init_schema(conn) == [10, 11, 12, 13]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
@@ -246,7 +246,7 @@ def test_an_unreconstructable_earlier_v9_warning_is_dropped_not_guessed(env):
     path, _ = legacy_example(env, "first", reconstructable=False)
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [10, 11]
+        assert store.init_schema(conn) == [10, 11, 12, 13]
     finally:
         conn.close()
     assert increase_rows(path) == []

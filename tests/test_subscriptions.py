@@ -19,7 +19,7 @@ NETFLIX = (
     "10/12/2026,NETFLIX.COM,-17.99\n"
 )
 
-MERCHANT = "Netflix.Com"
+MERCHANT = "Netflix"
 OTHER_USER = "00000000-0000-4000-8000-000000000002"
 
 
@@ -64,7 +64,7 @@ def render(path):
 
 
 def recurring_section(path):
-    return render(path).split("Recurring Charges")[1].split("Spending by Category")[0]
+    return render(path).split("Recurring Charges")[1].split("Accounts")[0]
 
 
 def statuses(capsys):
@@ -195,7 +195,7 @@ def test_a_v7_database_upgrades_keeps_ids_and_accepts_decisions(tmp_path):
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [8, 9, 10, 11]
+        assert store.init_schema(conn) == [8, 9, 10, 11, 12, 13]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         account = conn.execute("SELECT id FROM accounts LIMIT 1").fetchone()[0]
         repository.set_decision(conn, users.LOCAL_USER_ID, account, "Hulu",
@@ -216,7 +216,7 @@ def test_the_supported_v6_chain_reaches_v9_with_ids_intact(tmp_path):
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [7, 8, 9, 10, 11]
+        assert store.init_schema(conn) == [7, 8, 9, 10, 11, 12, 13]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
@@ -226,7 +226,7 @@ def test_the_supported_v6_chain_reaches_v9_with_ids_intact(tmp_path):
     joined = sql(path, "SELECT count(*) FROM transactions t JOIN accounts a "
                        "ON a.id = t.account_id")[0][0]
     assert joined == count
-    assert sql(path, "SELECT schema_version FROM meta")[0][0] == 11
+    assert sql(path, "SELECT schema_version FROM meta")[0][0] == 13
 
 
 def test_the_registry_has_a_step_for_v8():

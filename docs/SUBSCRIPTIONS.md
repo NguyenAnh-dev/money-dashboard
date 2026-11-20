@@ -59,6 +59,6 @@ Terminal-control characters are still escaped in UTF-8 mode. The terminal itself
 
 ## Limits
 
-- The merchant is matched exactly as stored (currently `Netflix.Com`). Task 7a changes how it is normalized; after that, decisions made on the old spelling would no longer match and need to be redone.
+- The merchant is matched exactly as stored. Task 7a normalizes the descriptor `NETFLIX.COM` to `Netflix` (it was `Netflix.Com`), the schema v12 migration rekeys decisions and price history from the old spelling to the new one ([rules](DASHBOARD_READABILITY.md#merchant-normalization-and-subscription-state)), and transaction IDs do not change.
 - There is no API route for decisions, only the CLI.
 - The CLI always acts as the local user.

@@ -232,7 +232,7 @@ def test_another_user_cannot_acknowledge(env):
     assert stored(path) == []
 
 
-@pytest.mark.parametrize("version,chain", [(7, [8, 9, 10, 11]), (6, [7, 8, 9, 10, 11])])
+@pytest.mark.parametrize("version,chain", [(7, [8, 9, 10, 11, 12, 13]), (6, [7, 8, 9, 10, 11, 12, 13])])
 def test_old_files_upgrade_and_accept_acknowledgements(tmp_path, version, chain):
     path = _seeded(tmp_path / "old.db")
     _downgrade(path, version)

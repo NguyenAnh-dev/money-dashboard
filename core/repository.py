@@ -31,6 +31,7 @@ ACCOUNT_COLUMNS = (
     "mask",
     "available_cents",
     "as_of",
+    "balance_known",
 )
 
 TRANSACTION_COLUMNS = (
@@ -101,6 +102,7 @@ def account_row(account: Account) -> tuple:
         account.mask,
         account.available_cents,
         _iso(account.as_of),
+        int(account.balance_known),
     )
 
 
@@ -519,6 +521,7 @@ def account_from_row(
         mask=row["mask"],
         available_cents=row["available_cents"],
         as_of=None if row["as_of"] is None else _to_date(row["as_of"]),
+        balance_known=bool(row["balance_known"]),
     )
 
 
@@ -796,12 +799,22 @@ def scan_watch(
     )
 
 
+def _event_scope(history):
+    if history is None:
+        return None, frozenset()
+    data = json.loads(history)
+    if isinstance(data, list):
+        return set(data), frozenset()
+    return set(data["seen"]), frozenset(data.get("foreign", ()))
+
+
 def reconcile_price_events(
     conn: sqlite3.Connection, user_id: str, moved: frozenset = frozenset()
 ) -> None:
     events = conn.execute(
         "SELECT account_id, merchant, charge_id, previous_charge_id, "
-        "charge_date, old_cents, new_cents FROM subscription_price_increases "
+        "charge_date, old_cents, new_cents, history "
+        "FROM subscription_price_increases "
         "WHERE user_id = ?", (user_id,),
     ).fetchall()
     where = ("WHERE user_id = ? AND account_id = ? AND merchant = ? "
@@ -825,11 +838,13 @@ def reconcile_price_events(
         before = None
         if now is not None and e["charge_id"] in ledger:
             limit = ledger[e["charge_id"]]
+            scope, foreign = _event_scope(e["history"])
             history = sorted(
                 (c for c in by_id.values()
-                 if ledger.get(c["id"], limit + 1) <= limit
+                 if (c["id"] in scope if scope is not None
+                     else ledger.get(c["id"], limit + 1) <= limit)
                  or c["id"] == e["previous_charge_id"] or c["id"] in moved
-                 or c["id"] in corrected),
+                 or (c["id"] in corrected and c["id"] not in foreign)),
                 key=lambda c: (c["date"], ledger.get(c["id"], float("inf"))),
             )
             at = [c["id"] for c in history].index(e["charge_id"])

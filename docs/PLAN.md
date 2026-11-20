@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Task 7a (make terminal amounts and warnings readable) awaits assignment.** Step 1 (baseline investigation), Task 1a (offline test startup), Tasks 2a–2d (CSV import and sync failure reporting), Task 3 (per-account candidate detection), Task 4 (subscription decisions), Task 5a (price-increase warnings), Task 5b (acknowledge the specific increase), and Task 6 (estimate the next monthly renewal) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**Task 7b (publish a local quickstart and verify the release) awaits assignment.** Step 1 (baseline investigation), Task 1a (offline test startup), Tasks 2a–2d (CSV import and sync failure reporting), Task 3 (per-account candidate detection), Task 4 (subscription decisions), Task 5a (price-increase warnings), Task 5b (acknowledge the specific increase), Task 6 (estimate the next monthly renewal), and Task 7a (make terminal amounts and warnings readable) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -102,6 +102,7 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Show increases and upcoming renewals first, followed by tracked subscriptions and candidates. Label credits and charges in plain text. Show CSV balances as unknown and identify the accounts included in any net-worth subtotal. Normalize the sample descriptor `NETFLIX.COM` to “Netflix” while preserving the raw descriptor and transaction ID.
 - **Accept when** a no-color display distinguishes payroll from spending, a CSV-only account shows unavailable net worth, and a genuine known zero balance can still display as zero. Empty states tell a new user how to import data or how many monthly observations are needed.
 - **Verify** no-color renders with an absent database, insufficient history, no active alerts, a known zero balance, a CSV-only account, and mixed known/unknown balances. Reimport the Netflix rows after normalization and compare IDs. Inspect the intentional golden diff. [Renderer](../main.py) · [Merchant normalization](../adapters/merchant.py)
+- **Accepted.** Claude moved alerts above tracked subscriptions and candidates, labelled credits and charges in plain text, added import guidance to empty states, and distinguished missing balances from genuine zeros in the terminal. Claude normalized `NETFLIX.COM` to `Netflix` and added schema upgrades through v13 that preserve raw descriptors, transaction IDs, and subscription state. The migration captures each warning’s history across the full alias group. Codex independently verified the no-color cases and confirmed with a four-key synthetic account that an unchanged replay preserves the original warning and that a later correction updates it. The offline suite reported **843 passed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate passed against the intentionally updated golden file. Recovery limits for databases merged by earlier builds are documented. [Implementation notes](DASHBOARD_READABILITY.md) · [Render tests](../tests/test_readable_render.py) · [Migration tests](../tests/test_merchant_rekey.py)
 
 ### 7b. Publish a local quickstart in the repository and verify the release
 
@@ -127,4 +128,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Task 7a awaits the owner’s assignment. Once assigned, Claude implements Task 7a only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+Task 7b awaits the owner’s assignment. Once assigned, Claude implements Task 7b only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.

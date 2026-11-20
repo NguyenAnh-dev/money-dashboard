@@ -208,7 +208,7 @@ def test_a_tracked_v8_subscription_keeps_watching_after_upgrade(env):
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [9, 10, 11]
+        assert store.init_schema(conn) == [9, 10, 11, 12, 13]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
@@ -234,7 +234,7 @@ def test_a_tracked_v8_subscription_with_no_history_starts_when_history_arrives(e
     _make_v8(path)
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [9, 10, 11]
+        assert store.init_schema(conn) == [9, 10, 11, 12, 13]
     finally:
         conn.close()
     assert query(path, "SELECT count(*) FROM subscription_price_observed")[0][0] == 0
@@ -277,7 +277,7 @@ def test_upgrade_chains_initialise_tracked_subscriptions(tmp_path, version):
 
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == list(range(version + 1, 12))
+        assert store.init_schema(conn) == list(range(version + 1, 14))
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
