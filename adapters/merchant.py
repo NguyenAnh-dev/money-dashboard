@@ -36,6 +36,7 @@ from __future__ import annotations
 #: head is the stable part.
 MERCHANT_PREFIXES = {
     "HULU": "Hulu",
+    "NETFLIX": "Netflix",
     "SAFEWAY": "Safeway",
     "SHELL OIL": "Shell",
     "COSTCO WHSE": "Costco",

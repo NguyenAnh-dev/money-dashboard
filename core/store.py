@@ -56,7 +56,7 @@ from core import migrations
 #: `upgrade` refuses to open a file it cannot walk forward rather than skipping
 #: the gap. Bumping this alone now fails loudly instead of orphaning every
 #: existing database. See docs/MIGRATIONS.md.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 13
 
 #: Where the database lives when DB_PATH is unset.
 #:
@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     mask              TEXT,
     available_cents   INTEGER,
     as_of             TEXT,
+    balance_known     INTEGER NOT NULL DEFAULT 1,
 
     -- typeof() is not belt-and-braces. INTEGER in SQLite is an AFFINITY: store
     -- 12.34 in that column and you get a REAL back, no error, and invariant 1
@@ -150,6 +151,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- cannot help here -- the database is a second door in, and a hand-written
     -- UPDATE never passes through it.
     CHECK (typeof(balance_cents) = 'integer'),
+    CHECK (balance_known IN (0, 1)),
     CHECK (available_cents IS NULL OR typeof(available_cents) = 'integer'),
     CHECK (length(currency) = 3 AND currency = upper(currency)),
     CHECK (provider IN ('fake', 'plaid', 'csv')),
@@ -262,6 +264,79 @@ CREATE TABLE IF NOT EXISTS connections (
     CHECK (access_token IS NULL OR access_token LIKE 'gAAAAA%'),
     CHECK (provider IN ('fake', 'plaid', 'csv')),
     CHECK (length(connection_id) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_decisions (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    decision        TEXT NOT NULL,
+    decided_at      TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant),
+    CHECK (decision IN ('tracked', 'dismissed')),
+    CHECK (length(merchant) > 0),
+    CHECK (length(decided_at) = 19)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_observed (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    charge_id       TEXT NOT NULL,
+    seq             INTEGER NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(merchant) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_corrected (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    charge_id       TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(merchant) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_watch (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    scanned_through TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant),
+    CHECK (length(merchant) > 0),
+    CHECK (length(scanned_through) = 10)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_increases (
+    user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id         TEXT NOT NULL REFERENCES accounts(id),
+    merchant           TEXT NOT NULL,
+    charge_id          TEXT NOT NULL,
+    previous_charge_id TEXT NOT NULL,
+    charge_date        TEXT NOT NULL,
+    old_cents          INTEGER NOT NULL,
+    new_cents          INTEGER NOT NULL,
+    history            TEXT,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(charge_date) = 10),
+    CHECK (new_cents > old_cents)
+);
+
+CREATE TABLE IF NOT EXISTS subscription_price_acknowledged (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      TEXT NOT NULL REFERENCES accounts(id),
+    merchant        TEXT NOT NULL,
+    charge_id       TEXT NOT NULL,
+    acknowledged_at TEXT NOT NULL,
+
+    PRIMARY KEY (user_id, account_id, merchant, charge_id),
+    CHECK (length(merchant) > 0),
+    CHECK (length(acknowledged_at) = 19)
 );
 
 -- Each index exists for a query we already know we make.

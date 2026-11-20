@@ -1,6 +1,28 @@
 
   MONEY DASHBOARD  v0.1 - fake data
 
+Alerts
+  No price increases or upcoming renewals. Tracked subscriptions appear here.
+
+                               Recurring Charges                                
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
+┃             ┃             ┃        ┃    Billing ┃        ┃                   ┃
+┃ Merchant    ┃ Account     ┃ Amount ┃        day ┃ Change ┃ Charges           ┃
+┡━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩
+│ T-Mobile    │ Chase       │ $91.77 │         16 │ +$7.46 │ 2026-05-18 $84.31 │
+│             │ Checking    │        │            │        │ 2026-06-16 $84.31 │
+│             │             │        │            │        │ 2026-07-16 $91.77 │
+│ Planet      │ Chase       │ $24.99 │         20 │        │ 2026-05-20 $24.99 │
+│ Fitness     │ Checking    │        │            │        │ 2026-06-22 $24.99 │
+│             │             │        │            │        │ 2026-07-20 $24.99 │
+│ Netflix     │ Amex Gold   │ $17.99 │         12 │ +$2.50 │ 2026-05-12 $15.49 │
+│             │ Card        │        │            │        │ 2026-06-12 $15.49 │
+│             │             │        │            │        │ 2026-07-13 $17.99 │
+│ Spotify     │ Amex Gold   │ $10.99 │          4 │        │ 2026-05-04 $10.99 │
+│             │ Card        │        │            │        │ 2026-06-04 $10.99 │
+│             │             │        │            │        │ 2026-07-06 $10.99 │
+└─────────────┴─────────────┴────────┴────────────┴────────┴───────────────────┘
+
                     Accounts                    
 ┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
 ┃ Institution      ┃ Account        ┃  Balance ┃
@@ -12,16 +34,6 @@
 ╭─ Net Worth (across all banks) ─╮
 │ $5751.72                       │
 ╰────────────────────────────────╯
-
-                        Recurring Charges                        
-┏━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┓
-┃ Merchant       ┃ Amount ┃ Billing day ┃ Last charged ┃ Change ┃
-┡━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━┩
-│ T-Mobile       │ $91.77 │          16 │ 2026-07-16   │ +$7.46 │
-│ Planet Fitness │ $24.99 │          20 │ 2026-07-20   │        │
-│ Netflix        │ $17.99 │          12 │ 2026-07-13   │ +$2.50 │
-│ Spotify        │ $10.99 │           4 │ 2026-07-06   │        │
-└────────────────┴────────┴─────────────┴──────────────┴────────┘
 
      Spending by Category      
 ┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
@@ -37,21 +49,21 @@
 │ Entertainment     │  $81.94 │
 └───────────────────┴─────────┘
 
-           Recent Transactions (latest 10)            
-┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━┓
-┃ Date       ┃ Merchant     ┃ Category     ┃  Amount ┃
-┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━┩
-│ 2026-07-31 │ Starbucks    │ Food & Drink │   $5.45 │
-│ 2026-07-30 │ Starbucks    │ Food & Drink │   $6.75 │
-│ 2026-07-29 │ CVS Pharmacy │ Health       │   $9.87 │
-│ 2026-07-28 │ Starbucks    │ Food & Drink │   $6.75 │
-│ 2026-07-27 │ Amex Payment │ Transfer     │ $682.04 │
-│ 2026-07-27 │ Chipotle     │ Food & Drink │  $16.94 │
-│ 2026-07-25 │ Whole Foods  │ Groceries    │  $88.19 │
-│ 2026-07-24 │ Shake Shack  │ Food & Drink │  $18.85 │
-│ 2026-07-23 │ Amazon       │ Shopping     │  $45.99 │
-│ 2026-07-21 │ Trader Joes  │ Groceries    │  $62.18 │
-└────────────┴──────────────┴──────────────┴─────────┘
+                Recent Transactions (latest 10)                
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━┓
+┃ Date       ┃ Merchant     ┃ Category     ┃ Type   ┃  Amount ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━┩
+│ 2026-07-31 │ Starbucks    │ Food & Drink │ Charge │   $5.45 │
+│ 2026-07-30 │ Starbucks    │ Food & Drink │ Charge │   $6.75 │
+│ 2026-07-29 │ CVS Pharmacy │ Health       │ Charge │   $9.87 │
+│ 2026-07-28 │ Starbucks    │ Food & Drink │ Charge │   $6.75 │
+│ 2026-07-27 │ Amex Payment │ Transfer     │ Charge │ $682.04 │
+│ 2026-07-27 │ Chipotle     │ Food & Drink │ Charge │  $16.94 │
+│ 2026-07-25 │ Whole Foods  │ Groceries    │ Charge │  $88.19 │
+│ 2026-07-24 │ Shake Shack  │ Food & Drink │ Charge │  $18.85 │
+│ 2026-07-23 │ Amazon       │ Shopping     │ Charge │  $45.99 │
+│ 2026-07-21 │ Trader Joes  │ Groceries    │ Charge │  $62.18 │
+└────────────┴──────────────┴──────────────┴────────┴─────────┘
 
 76 transactions across 3 accounts at 3 institutions
 last synced 2026-08-01 09:00

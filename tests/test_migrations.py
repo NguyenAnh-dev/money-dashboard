@@ -282,7 +282,7 @@ def test_a_step_that_raises_leaves_the_database_untouched(tmp_path,
         migrations.to_v7(conn)
         raise RuntimeError("interrupted")
 
-    monkeypatch.setattr(migrations, "MIGRATIONS", {6: half_way})
+    monkeypatch.setattr(migrations, "MIGRATIONS", {6: half_way, 7: migrations.to_v8, 8: migrations.to_v9, 9: migrations.to_v10, 10: migrations.to_v11, 11: migrations.to_v12, 12: migrations.to_v13})
 
     with pytest.raises(RuntimeError, match="interrupted"):
         store.open_db(str(path))
@@ -303,7 +303,7 @@ def test_a_step_that_orphans_a_row_is_rolled_back(tmp_path, monkeypatch):
             "UPDATE accounts SET id = id || '-moved' WHERE provider = 'fake'"
         )
 
-    monkeypatch.setattr(migrations, "MIGRATIONS", {6: accounts_only})
+    monkeypatch.setattr(migrations, "MIGRATIONS", {6: accounts_only, 7: migrations.to_v8, 8: migrations.to_v9, 9: migrations.to_v10, 10: migrations.to_v11, 11: migrations.to_v12, 12: migrations.to_v13})
 
     with pytest.raises(migrations.MigrationFailed, match="parent that does not"):
         store.open_db(str(path))
@@ -370,7 +370,7 @@ def test_a_migrated_database_reports_which_versions_it_passed(tmp_path):
     path = _v6(tmp_path)
     conn = store.connect(str(path))
     try:
-        assert store.init_schema(conn) == [7]
+        assert store.init_schema(conn) == [7, 8, 9, 10, 11, 12, 13]
     finally:
         conn.close()
 

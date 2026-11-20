@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from datetime import date
+from calendar import monthrange
+from datetime import date, timedelta
 
 from core.models import TransactionKind
 
@@ -11,12 +12,14 @@ MAX_GAP_DAYS = 35
 @dataclass
 class RecurringCharge:
     merchant: str
+    account_id: str
     latest_cents: int           # what it costs now
     previous_cents: int | None  # last amount that DIFFERS from latest;
                                 # None means the price has never moved
     day: int                    # billing anchor: earliest day-of-month seen
     last_date: date
     occurrences: int
+    evidence: tuple = ()        # ((date, cents), ...) oldest first, for review
 
     # Derived, so the CLI and (later) the API report a price change the same
     # way instead of each recomputing it in its own display loop.
@@ -66,7 +69,7 @@ def spending_by_category(transactions):
 def find_recurring(transactions):
     by_merchant = {}
     for txn in transactions:
-        if txn.amount_cents < 0:      # income, not a charge
+        if txn.amount_cents <= 0:     # income or a zero entry, not a charge
             continue
         # A pending charge's amount is still provisional -- a card auth posts at
         # a different number all the time (tip, fuel hold, currency). Include it
@@ -83,10 +86,10 @@ def find_recurring(transactions):
         # "Uncategorized".
         if txn.kind is TransactionKind.TRANSFER:
             continue
-        by_merchant.setdefault(txn.merchant, []).append(txn)
+        by_merchant.setdefault((txn.account_id, txn.merchant), []).append(txn)
 
     found = []
-    for merchant, txns in by_merchant.items():
+    for (account_id, merchant), txns in by_merchant.items():
         # Year matters: over a 12+ month Plaid pull, a bare month number would
         # merge May 2026 with May 2027 and overstate the evidence.
         months = {(txn.date.year, txn.date.month) for txn in txns}
@@ -119,11 +122,127 @@ def find_recurring(transactions):
 
         found.append(RecurringCharge(
             merchant=merchant,
+            account_id=account_id,
             latest_cents=amounts[-1],
             previous_cents=earlier[-1] if earlier else None,
             day=min(days),
             last_date=txns[-1].date,
             occurrences=len(txns),
+            evidence=tuple((t.date, t.amount_cents) for t in txns),
         ))
 
-    return sorted(found, key=lambda c: c.latest_cents, reverse=True)
+    return sorted(found, key=lambda c: (-c.latest_cents, c.merchant, c.account_id))
+
+
+@dataclass(frozen=True)
+class PriceIncrease:
+    merchant: str
+    account_id: str
+    charge_id: str
+    date: date
+    old_cents: int
+    new_cents: int
+
+    @property
+    def delta_cents(self) -> int:
+        return self.new_cents - self.old_cents
+
+    @property
+    def key(self) -> tuple:
+        return (self.account_id, self.merchant, self.charge_id)
+
+
+RENEWAL_WINDOW_DAYS = 7
+
+
+@dataclass(frozen=True)
+class Renewal:
+    merchant: str
+    account_id: str
+    expected: date
+    cents: int
+    latest_import: date | None
+    overdue: bool
+
+
+MAX_POSTING_DELAY_DAYS = 3
+
+
+def is_month_end(day: date) -> bool:
+    return day.day == monthrange(day.year, day.month)[1]
+
+
+def billing_cycles(dates) -> list:
+    cycles = []
+    for posted in sorted(set(dates)):
+        cycle = posted
+        if cycles and posted.day <= MAX_POSTING_DELAY_DAYS and len(cycles) >= 2:
+            try:
+                before = posted - timedelta(days=posted.day)
+            except OverflowError:
+                cycles.append(cycle)
+                continue
+            previous = cycles[-1]
+            one_month_on = ((before.year * 12 + before.month)
+                            - (previous.year * 12 + previous.month)) == 1
+            if one_month_on and all(is_month_end(c) for c in cycles):
+                cycle = before
+        cycles.append(cycle)
+    return cycles
+
+
+def billing_day(dates) -> int:
+    days = []
+    month_end_days = []
+    for charged in dates:
+        if is_month_end(charged):
+            month_end_days.append(charged.day)
+        else:
+            days.append(charged.day)
+    return min(days) if days else max(month_end_days)
+
+
+def anchor_day(dates) -> int:
+    return billing_day(billing_cycles(dates))
+
+
+def next_billing_date(last_date: date, dates) -> date | None:
+    year, month = last_date.year, last_date.month + 1
+    if month == 13:
+        year, month = year + 1, 1
+    if year > date.max.year:
+        return None
+    day = min(billing_day(dates), monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def estimate_renewals(histories, latest_imports, today: date):
+    try:
+        last_day = today + timedelta(days=RENEWAL_WINDOW_DAYS)
+    except OverflowError:
+        last_day = date.max
+    found = []
+    for (account_id, merchant), charges in histories.items():
+        if not charges:
+            continue
+        cycles = billing_cycles(d for d, _ in charges)
+        expected = next_billing_date(cycles[-1], cycles)
+        if expected is None or expected > last_day:
+            continue
+        found.append(Renewal(
+            merchant=merchant,
+            account_id=account_id,
+            expected=expected,
+            cents=charges[-1][1],
+            latest_import=latest_imports.get(account_id),
+            overdue=expected < today,
+        ))
+    return sorted(found, key=lambda r: (r.expected, r.merchant, r.account_id))
+
+
+def latest_import_dates(transactions) -> dict:
+    latest = {}
+    for txn in transactions:
+        if txn.account_id not in latest or txn.date > latest[txn.account_id]:
+            latest[txn.account_id] = txn.date
+    return latest

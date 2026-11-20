@@ -26,7 +26,7 @@ conformance test in tests/ exists to catch it:
 
   4. `merchant` is never empty. Grouping happens on it.
 
-See docs/DATA_MODEL.md for the reasoning behind all of this.
+See docs/MIGRATIONS.md for how ids are scoped per user.
 """
 
 from dataclasses import dataclass, field
@@ -197,6 +197,8 @@ class Account:
     available_cents: int | None = None   # differs from balance while charges
                                          # are still pending
     as_of: date | None = None            # a balance is a snapshot, not a fact
+    balance_known: bool = True           # False: the source supplied no balance
+                                         # and balance_cents is a placeholder
 
     def __post_init__(self) -> None:
         self.currency = _clean_currency(self.currency)

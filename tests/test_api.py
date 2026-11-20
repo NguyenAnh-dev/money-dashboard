@@ -684,6 +684,71 @@ def test_the_recurring_endpoint_reports_a_price_change(client, db):
     assert by_merchant["Spotify"]["delta_cents"] is None
 
 
+def test_the_recurring_endpoint_keeps_cards_apart_and_shows_evidence(client, db):
+    user_id = _user(db)
+    cards = [_account(f"c{i}_conn", f"acc_c{i}", name=f"Card {i}") for i in (1, 2)]
+    months = [date(2026, 5, 10), date(2026, 6, 10), date(2026, 7, 11)]
+    txns = [
+        _transaction(cards[0], f"n{i}", date=d, merchant="Netflix", amount_cents=1799)
+        for i, d in enumerate(months)
+    ]
+    txns += [
+        _transaction(cards[1], f"p{i}", date=d, merchant="Netflix", amount_cents=1799)
+        for i, d in enumerate(months[:2])
+    ]
+    repository.save(db, user_id, cards, txns)
+
+    rows = _as(client, sessions.create_session(db, user_id)).get("/recurring").json()
+
+    assert len(rows) == 1
+    assert rows[0]["account_id"] == cards[0].id
+    assert rows[0]["evidence"] == [
+        {"date": d.isoformat(), "amount_cents": 1799} for d in months
+    ]
+
+
+def test_the_recurring_endpoint_keeps_the_earliest_day_for_month_end_charges(client, db):
+    user_id = _user(db)
+    card = _account("m_conn", "acc_m", name="Card M")
+    days = [date(2026, 11, 30), date(2026, 12, 31), date(2027, 1, 31), date(2027, 2, 28)]
+    repository.save(db, user_id, [card], [
+        _transaction(card, f"m{i}", date=d, merchant="Netflix", amount_cents=1799)
+        for i, d in enumerate(days)
+    ])
+    rows = _as(client, sessions.create_session(db, user_id)).get("/recurring").json()
+    assert len(rows) == 1 and rows[0]["day"] == 28
+
+
+def test_recurring_never_crosses_owners(client, db):
+    months = [date(2026, 5, 10), date(2026, 6, 10), date(2026, 7, 11)]
+    seeded = {}
+    for email, tag, amounts in (
+        ("ada@example.com", "ada", [1799, 1799, 1999]),
+        ("bob@example.com", "bob", [1599, 1599, 1599]),
+    ):
+        user_id = _user(db, email)
+        card = _account(f"{tag}_conn", f"acc_{tag}", name=f"{tag} card")
+        txns = [
+            _transaction(card, f"{tag}{i}", date=d, merchant="Netflix",
+                         amount_cents=c)
+            for i, (d, c) in enumerate(zip(months, amounts))
+        ]
+        repository.save(db, user_id, [card], txns)
+        seeded[tag] = (sessions.create_session(db, user_id), card.id, amounts)
+
+    assert seeded["ada"][1] != seeded["bob"][1]
+    for tag, (token, account_id, amounts) in seeded.items():
+        rows = _as(client, token).get("/recurring").json()
+        assert len(rows) == 1
+        assert rows[0]["account_id"] == account_id
+        assert rows[0]["merchant"] == "Netflix"
+        assert rows[0]["latest_cents"] == amounts[-1]
+        assert rows[0]["evidence"] == [
+            {"date": d.isoformat(), "amount_cents": c}
+            for d, c in zip(months, amounts)
+        ]
+
+
 def test_no_transfer_reaches_the_spending_endpoint(client, db):
     """4.8's rule, still holding one layer out. The fixture's Amex payment is a
     transfer, and counting it would put $1634.49 of money that was never spent
