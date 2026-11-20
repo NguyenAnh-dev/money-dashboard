@@ -1,7 +1,7 @@
 # Baseline
 
 `dashboard.txt` is the rendered dashboard from **before** the data-model
-refactor in [../../docs/DATA_MODEL.md](../../docs/DATA_MODEL.md).
+refactor described in [../../docs/MIGRATIONS.md](../../docs/MIGRATIONS.md).
 
 ## Running the gate
 
@@ -32,8 +32,8 @@ STRUCTURE fails. The diff cannot do this job.
 
 (That id is three colon-separated segments — `provider:connection_id:provider_id`
 — and the format is normative, since it becomes the SQLite primary key at Step
-5. See `make_id` in [core/models.py](../../core/models.py) and §2 of
-[DATA_MODEL.md](../../docs/DATA_MODEL.md).)
+5. See `make_id` in [core/models.py](../../core/models.py) and
+[MIGRATIONS.md](../../docs/MIGRATIONS.md).)
 
 ## Why the output is reproducible
 

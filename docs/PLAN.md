@@ -1,6 +1,6 @@
 # Local subscription tracker implementation plan
 
-**Task 7b (publish a local quickstart and verify the release) awaits assignment.** Step 1 (baseline investigation), Task 1a (offline test startup), Tasks 2a–2d (CSV import and sync failure reporting), Task 3 (per-account candidate detection), Task 4 (subscription decisions), Task 5a (price-increase warnings), Task 5b (acknowledge the specific increase), Task 6 (estimate the next monthly renewal), and Task 7a (make terminal amounts and warnings readable) are accepted. The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
+**All tasks for the local release through Task 7b are accepted.** The first release is a local USD terminal dashboard where a user imports posted transactions, reviews likely monthly subscriptions, tracks or dismisses them, and sees price increases and estimated renewals when they open the dashboard.
 
 ## Baseline review
 
@@ -109,6 +109,7 @@ Work from top to bottom. Each task is a separate review handoff. Use temporary d
 - **Change.** Write a root README with exact installation and local commands for preview, import, review, track/dismiss/restore, and acknowledgement. Describe CSV sign and currency conventions, local storage, and when warnings appear. Correct stale guidance links encountered in this workflow.
 - **Accept when** a new user can follow the README from a fresh temporary database to an acknowledged Netflix warning that stays cleared on reopening. The demo requires only a synthetic statement and local dependencies.
 - **Verify** by following the README literally, then running `python -m pytest` and `python tests/check_baseline.py` separately. Report pass/fail/skip counts, baseline result, and any intentional output changes. Check paths referenced by the quickstart. No hosted release is part of this task.
+- **Accepted.** Claude added the root quickstart, corrected stale data-model links, and added tests that follow the documented commands. Codex independently followed the synthetic Netflix walkthrough across two PowerShell sessions using the existing virtual environment and a disposable database. After acknowledgement and reopening with the same `DB_PATH`, Netflix stayed tracked, the warning stayed cleared, and the default database was untouched. The offline suite reported **850 passed, 0 failed, 1 skipped, 1 warning**. Live Plaid was intentionally skipped, and the warning was the existing Starlette deprecation. The separate render and structure gate passed with byte-identical output. Referenced paths and staged and unstaged whitespace checks passed. [Quickstart](../README.md) · [Quickstart tests](../tests/test_readme.py)
 
 ## Synthetic statement for acceptance checks
 
@@ -128,4 +129,4 @@ Date,Description,Amount
 
 ## Next handoff
 
-Task 7b awaits the owner’s assignment. Once assigned, Claude implements Task 7b only and returns the diff and verification results. Codex returns **accepted**, **changes requested**, or **verification pending** with the reason before the next handoff.
+The local release plan is complete. Further work awaits the owner’s assignment.

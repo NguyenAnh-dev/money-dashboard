@@ -26,7 +26,7 @@ conformance test in tests/ exists to catch it:
 
   4. `merchant` is never empty. Grouping happens on it.
 
-See docs/DATA_MODEL.md for the reasoning behind all of this.
+See docs/MIGRATIONS.md for how ids are scoped per user.
 """
 
 from dataclasses import dataclass, field
